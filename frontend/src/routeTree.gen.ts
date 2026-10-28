@@ -12,8 +12,11 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthedRouteImport } from './routes/_authed'
 import { Route as GuestRouteImport } from './routes/_guest'
 import { Route as AuthedHomeRouteImport } from './routes/_authed/home'
+import { Route as AuthedPaymentsRouteImport } from './routes/_authed/payments'
+import { Route as AuthedProfileRouteImport } from './routes/_authed/profile'
 import { Route as GuestIndexRouteImport } from './routes/_guest/index'
 import { Route as GuestRegisterRouteImport } from './routes/_guest/register'
+import { Route as GuestVerifyEmailRouteImport } from './routes/_guest/verify-email'
 
 const AuthedRoute = AuthedRouteImport.update({
   id: '/_authed',
@@ -28,6 +31,16 @@ const AuthedHomeRoute = AuthedHomeRouteImport.update({
   path: '/home',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedPaymentsRoute = AuthedPaymentsRouteImport.update({
+  id: '/payments',
+  path: '/payments',
+  getParentRoute: () => AuthedRoute,
+} as any)
+const AuthedProfileRoute = AuthedProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
+  getParentRoute: () => AuthedRoute,
+} as any)
 const GuestIndexRoute = GuestIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -38,36 +51,54 @@ const GuestRegisterRoute = GuestRegisterRouteImport.update({
   path: '/register',
   getParentRoute: () => GuestRoute,
 } as any)
+const GuestVerifyEmailRoute = GuestVerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
+  getParentRoute: () => GuestRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof GuestIndexRoute
   '/home': typeof AuthedHomeRoute
+  '/payments': typeof AuthedPaymentsRoute
+  '/profile': typeof AuthedProfileRoute
   '/register': typeof GuestRegisterRoute
+  '/verify-email': typeof GuestVerifyEmailRoute
 }
 export interface FileRoutesByTo {
   '/': typeof GuestIndexRoute
   '/home': typeof AuthedHomeRoute
+  '/payments': typeof AuthedPaymentsRoute
+  '/profile': typeof AuthedProfileRoute
   '/register': typeof GuestRegisterRoute
+  '/verify-email': typeof GuestVerifyEmailRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authed': typeof AuthedRouteWithChildren
   '/_guest': typeof GuestRouteWithChildren
   '/_authed/home': typeof AuthedHomeRoute
+  '/_authed/payments': typeof AuthedPaymentsRoute
+  '/_authed/profile': typeof AuthedProfileRoute
   '/_guest/register': typeof GuestRegisterRoute
+  '/_guest/verify-email': typeof GuestVerifyEmailRoute
   '/_guest/': typeof GuestIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/home' | '/register'
+  fullPaths:
+    '/' | '/home' | '/payments' | '/profile' | '/register' | '/verify-email'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/home' | '/register'
+  to: '/' | '/home' | '/payments' | '/profile' | '/register' | '/verify-email'
   id:
     | '__root__'
     | '/_authed'
     | '/_guest'
     | '/_authed/home'
+    | '/_authed/payments'
+    | '/_authed/profile'
     | '/_guest/register'
+    | '/_guest/verify-email'
     | '/_guest/'
   fileRoutesById: FileRoutesById
 }
@@ -99,6 +130,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedHomeRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/payments': {
+      id: '/_authed/payments'
+      path: '/payments'
+      fullPath: '/payments'
+      preLoaderRoute: typeof AuthedPaymentsRouteImport
+      parentRoute: typeof AuthedRoute
+    }
+    '/_authed/profile': {
+      id: '/_authed/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof AuthedProfileRouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_guest/': {
       id: '/_guest/'
       path: '/'
@@ -113,15 +158,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GuestRegisterRouteImport
       parentRoute: typeof GuestRoute
     }
+    '/_guest/verify-email': {
+      id: '/_guest/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof GuestVerifyEmailRouteImport
+      parentRoute: typeof GuestRoute
+    }
   }
 }
 
 interface AuthedRouteChildren {
   AuthedHomeRoute: typeof AuthedHomeRoute
+  AuthedPaymentsRoute: typeof AuthedPaymentsRoute
+  AuthedProfileRoute: typeof AuthedProfileRoute
 }
 
 const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedHomeRoute: AuthedHomeRoute,
+  AuthedPaymentsRoute: AuthedPaymentsRoute,
+  AuthedProfileRoute: AuthedProfileRoute,
 }
 
 const AuthedRouteWithChildren =
@@ -129,11 +185,13 @@ const AuthedRouteWithChildren =
 
 interface GuestRouteChildren {
   GuestRegisterRoute: typeof GuestRegisterRoute
+  GuestVerifyEmailRoute: typeof GuestVerifyEmailRoute
   GuestIndexRoute: typeof GuestIndexRoute
 }
 
 const GuestRouteChildren: GuestRouteChildren = {
   GuestRegisterRoute: GuestRegisterRoute,
+  GuestVerifyEmailRoute: GuestVerifyEmailRoute,
   GuestIndexRoute: GuestIndexRoute,
 }
 
