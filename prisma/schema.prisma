@@ -300,10 +300,11 @@ model MerchantProfile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  merchant      Merchant                @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  approvedBy    Admin?                  @relation("ProfileApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
-  documents     MerchantDocument[]
-  reviewHistory MerchantReviewHistory[]
+  merchant          Merchant                @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  approvedBy        Admin?                  @relation("ProfileApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  documents         MerchantDocument[]
+  reviewHistory     MerchantReviewHistory[]
+  documentUploads   MerchantDocumentUpload[]
 
   @@map("merchant_profiles")
 }
@@ -394,4 +395,20 @@ model CheckoutSession {
   @@index([transactionId, status])
   @@index([status, expiresAt])
   @@map("checkout_sessions")
+}
+
+model MerchantDocumentUpload {
+  id               String       @id @default(uuid()) @db.Uuid
+  profileId        String       @db.Uuid
+  type             DocumentType
+  objectKey        String       @unique
+  expectedMimeType String
+  expiresAt        DateTime
+  completedAt      DateTime?
+  createdAt        DateTime     @default(now())
+
+  profile MerchantProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, expiresAt])
+  @@map("merchant_document_uploads")
 }

@@ -12,6 +12,7 @@ import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
 import { PaymentProvidersModule } from './payment-providers/payment-providers.module.js';
 import { ProviderCallbacksModule } from './provider-callbacks/provider-callbacks.module.js';
+import { StorageModule } from './storage/storage.module.js';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { ProviderCallbacksModule } from './provider-callbacks/provider-callbacks
     TransactionsModule,
     PaymentProvidersModule,
     ProviderCallbacksModule,
+    StorageModule,
   ],
   controllers: [AppController],
   providers: [AppService],

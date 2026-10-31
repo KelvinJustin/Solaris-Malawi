@@ -1,548 +1,124 @@
 # Solaris Architecture Overview
 
-> **Status:** Draft
-> **Last Updated:** October 2026
+This document reflects the architecture currently implemented in the repository rather than a long-term idealized roadmap.
 
-## 1. Purpose
+## 1. Current system shape
 
-This document describes the high-level technical architecture of **Solaris Malawi**.
-
-Solaris is an API-first payment gateway and integration layer that provides merchants with a unified interface for interacting with multiple payment providers in the Malawian payment ecosystem.
-
-The architecture is designed around four primary goals:
-
-* **Provider abstraction** — hide provider-specific implementation details from merchants.
-* **Reliability** — handle failures, retries, delayed callbacks, and asynchronous payment completion.
-* **Consistency** — normalize different provider behaviors into a common internal payment model.
-* **Extensibility** — allow additional payment providers and capabilities to be introduced without redesigning the core system.
-
----
-
-## 2. Architectural Style
-
-Solaris is being developed as a **modular monolith**.
-
-The application runs as a single backend deployment, while its internal functionality is separated into well-defined business modules.
+Solaris is a modular monolith built with NestJS, TypeScript, PostgreSQL, Prisma, and Redis. The backend is organized around feature modules instead of independent services.
 
 ```text
-                    Solaris API
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-        ▼                ▼                ▼
-   Merchants         Payments         Webhooks
-                         │
-                         ▼
-                Provider Abstraction
-                         │
-            ┌────────────┼────────────┐
-            ▼            ▼            ▼
-         Airtel         TNM         Banks
-         Money         Mpamba
-```
-
-A modular monolith is currently preferred over microservices because the project is in its early development stage and does not yet require independently deployed services.
-
-The architecture should maintain clear module boundaries so that individual components can be extracted into separate services later if there is a genuine operational reason to do so.
-
----
-
-## 3. High-Level System
-
-The core system consists of the Solaris API, PostgreSQL, Redis, and external payment providers.
-
-```text
-                         Merchant
-                            │
-                            │ HTTPS
-                            ▼
-                    ┌───────────────┐
-                    │  Solaris API │
-                    │    NestJS     │
-                    └───────┬───────┘
-                            │
-             ┌──────────────┼──────────────┐
-             │              │              │
-             ▼              ▼              ▼
-        Merchant         Payment        Webhook
-         Module          Module         Module
-                            │
-                            ▼
-                    Provider Abstraction
-                     │       │       │
-                     ▼       ▼       ▼
-                  Airtel    TNM     Banks
-                   Money   Mpamba
-                            │
-                            ▼
-                       PostgreSQL
-                            ▲
-                            │
-                         Prisma
-                            │
-                            ▼
-                          Redis
-```
-
-PostgreSQL is the primary persistent datastore.
-
-Redis provides infrastructure capabilities such as caching and is available for asynchronous workloads and other short-lived state where appropriate.
-
-The development environment currently uses **Neon PostgreSQL** as the hosted PostgreSQL database and **Docker Compose** for the API and Redis development environment.
-
----
-
-## 4. Core Components
-
-### 4.1 Solaris API
-
-The Solaris API is the primary entry point for merchant applications.
-
-It is responsible for:
-
-* Authentication and authorization
-* Request validation
-* Merchant operations
-* Payment initiation
-* Payment status queries
-* Webhook handling
-* Idempotency
-* API error handling
-* Exposing a consistent interface to merchants
-
-The API should remain independent of individual payment-provider implementations.
-
----
-
-### 4.2 Merchant Module
-
-The Merchant module manages entities and functionality related to businesses integrating with Solaris.
-
-Potential responsibilities include:
-
-* Merchant registration
-* Merchant credentials
-* API keys
-* Merchant configuration
-* Provider configuration
-* Merchant transaction access
-
-The exact merchant model will evolve as the business requirements are finalized.
-
----
-
-### 4.3 Payment Module
-
-The Payment module represents the core business domain.
-
-It manages the lifecycle of payments initiated through Solaris.
-
-A simplified lifecycle is:
-
-```text
-Initiated
-    │
-    ▼
-Processing
-    │
-    ├──────────────► Failed
-    │
-    ▼
-Successful
-    │
-    ▼
-Funds Awaiting Settlement
-    │
-    ▼
-Settled
-```
-
-Provider-specific statuses should not leak directly into the merchant-facing API.
-
-Instead, Solaris should maintain a normalized internal payment state model and map provider-specific responses into that model.
-
----
-
-### 4.4 Provider Abstraction
-
-The provider layer isolates external payment-provider implementations from the rest of the application.
-
-Conceptually:
-
-```text
-                 Payment Module
-                       │
-                       ▼
-              Provider Interface
-                       │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-     Airtel Money   TNM Mpamba    Bank
-      Adapter        Adapter      Adapter
-```
-
-Each provider adapter is responsible for provider-specific concerns such as:
-
-* Authentication
-* Request formatting
-* Provider API calls
-* Response parsing
-* Callback handling
-* Provider-specific error handling
-* Provider status mapping
-
-The payment domain should depend on the abstraction rather than directly depending on a specific provider.
-
-This allows additional providers to be added without changing merchant-facing payment functionality.
-
----
-
-## 5. Webhook Processing
-
-Payment providers may notify Solaris asynchronously after a payment has been initiated.
-
-A typical flow is:
-
-```text
-Merchant
-   │
-   ▼
-Solaris
-   │
-   ▼
-Provider
-   │
-   │ Payment processing
-   │
-   ▼
-Provider Webhook
-   │
-   ▼
-Solaris Webhook Handler
-   │
-   ▼
-Payment State Update
-   │
-   ▼
-Merchant Notification
-```
-
-Webhook processing must account for:
-
-* Duplicate callbacks
-* Invalid signatures
-* Delayed callbacks
-* Out-of-order events
-* Provider retries
-* Unknown transactions
-
-Webhook handling should therefore be **idempotent** and should not assume that callbacks will arrive exactly once or in the expected order.
-
----
-
-## 6. Data Layer
-
-PostgreSQL is the primary persistent datastore.
-
-Prisma provides the application data-access layer and database schema management.
-
-```text
-NestJS Application
+Merchant or admin client
         │
         ▼
-      Prisma
+Solaris API (/v1)
+        │
+        ├── auth
+        ├── merchants
+        ├── admin-auth
+        ├── admin
+        ├── transactions
+        ├── payment-providers
+        ├── provider-callbacks
+        ├── storage
+        ├── email
+        └── arcjet
         │
         ▼
-   PostgreSQL
+PostgreSQL + Prisma
+        │
+        └── Merchant, profile, document, review, payment, and callback data
+
+Local development infrastructure:
+- Redis via Docker Compose
+- Cloudflare R2 for uploaded KYC documents
+- SMTP server for email delivery
 ```
 
-Persistent records are expected to include entities such as:
+This architecture reflects the actual code in `src/app.module.ts` and the feature modules under `src/`.
 
-* Merchants
-* Payments
-* Transactions
-* Provider operations
-* Webhook events
-* Idempotency records
-* Settlement information
-* Reconciliation records
+## 2. Implemented responsibilities
 
-The final schema will be defined as the individual business domains are implemented.
+### Merchant and onboarding domain
 
----
+The `auth` and `merchants` modules handle:
 
-## 7. Redis
+- merchant registration
+- email verification OTPs
+- password-based login and 2FA login verification
+- JWT authentication and explicit revocation
+- merchant profile creation and update
+- submission validation and admin review transitions
+- KYC document upload request generation and document status tracking
 
-Redis provides fast, short-lived data storage and infrastructure capabilities.
-
-Potential uses include:
+### Administration domain
 
-* Caching
-* Rate limiting
-* Temporary state
-* Distributed locks
-* Background job infrastructure
+The `admin-auth` and `admin` modules handle:
 
-Redis should not become the authoritative source for financial transaction records.
+- internal admin authentication
+- role-based authorization
+- review of merchant applications
+- approval and rejection logic
+- audit history for status transitions
 
-Critical payment and transaction state must remain durably persisted in PostgreSQL.
+### Payment domain
 
----
+The `transactions`, `checkout`, `payment-providers`, and `provider-callbacks` modules implement:
 
-## 8. Background Processing
+- payment transaction creation and lookup
+- hosted checkout sessions
+- idempotent transaction creation boundaries
+- provider adapter registration
+- a simulator provider for local testing
+- signed callback verification and payment-state transitions
 
-Some payment operations are inherently asynchronous.
+This is more than a placeholder. It is an implemented payment lifecycle, but it is intentionally scoped and not a complete production settlement system.
 
-Examples include:
+## 3. Provider abstraction
 
-* Processing provider callbacks
-* Retrying failed provider requests
-* Sending merchant webhooks
-* Reconciliation
-* Settlement processing
-* Other long-running operations
+The provider layer is implemented through a registry and adapter contract:
 
-Where background job processing becomes necessary, **BullMQ** will be introduced on top of Redis.
+- `src/payment-providers/contracts/payment-provider.interface.ts`
+- `src/payment-providers/registry/payment-provider.registry.ts`
+- `src/payment-providers/adapters/test-provider.adapter.ts`
 
-```text
-Solaris API
-     │
-     ▼
-   Redis
-     │
-     ▼
-  BullMQ
-     │
-     ▼
- Worker
-     │
-     ├── Provider retry
-     ├── Webhook delivery
-     └── Reconciliation
-```
+The current implementation exposes a single `TEST` provider adapter and is designed so additional provider adapters can be added without changing the transaction service contract.
 
-BullMQ is intentionally not treated as a core dependency until concrete asynchronous workflows require it.
+## 4. Callback processing
 
----
+Callback handling is implemented in `src/provider-callbacks/provider-callbacks.service.ts` and is designed to:
 
-## 9. Reliability Principles
+- verify HMAC signatures against the raw request body
+- reject expired or invalid timestamps
+- ignore duplicates when the final outcome is unchanged
+- guard against stale or contradictory state changes with transactional updates
 
-Payment infrastructure must assume that external systems can fail.
+This protects the payment state from race conditions and duplicate callback payloads.
 
-Solaris should account for:
-
-* Network failures
-* Provider downtime
-* Request timeouts
-* Duplicate requests
-* Duplicate webhooks
-* Delayed responses
-* Partial failures
-* Temporary service unavailability
+## 5. Storage layer
 
-The architecture therefore favors:
-
-* Explicit payment states
-* Durable transaction records
-* Idempotent operations
-* Controlled retries
-* Timeout handling
-* Provider-independent state management
-* Reconciliation
+The `storage` module integrates with Cloudflare R2 using the AWS S3 SDK:
 
----
+- pre-signed upload URLs
+- signed download URLs
+- metadata inspection
+- file-signature validation for PDF/JPEG/PNG uploads
+- cleanup for rejected or invalid uploads
 
-## 10. Idempotency
+The actual document upload flow is implemented, but it remains a backend-only storage workflow. It is not yet a full user-facing file management UI.
 
-Payment initiation and other state-changing operations should support idempotency.
+## 6. Important limitations
 
-A simplified request flow is:
-
-```text
-Merchant Request
-       │
-       ▼
-Idempotency Check
-       │
-   ┌───┴────┐
-   │        │
- Exists   New Request
-   │        │
-   ▼        ▼
-Return    Process
-Existing    │
-Result      ▼
-         Save Result
-```
-
-This prevents accidental duplicate transactions when merchants retry requests because of network failures, timeouts, or uncertain responses.
-
-Webhook processing should use the same principle to prevent duplicate provider callbacks from producing duplicate state transitions or side effects.
-
----
-
-## 11. Reconciliation
-
-Provider responses and Solaris records may occasionally become inconsistent.
-
-Reconciliation provides a mechanism for detecting and resolving these discrepancies.
-
-```text
-Solaris Transactions
-          │
-          ▼
-    Reconciliation
-          ▲
-          │
-Provider Transactions
-```
-
-Potential reconciliation outcomes include:
-
-```text
-Matched
-Missing
-Mismatched
-Requires Review
-```
-
-Reconciliation is particularly important for payment systems because a successful provider transaction should not depend solely on the availability or correctness of a single callback.
+The current repository does not yet implement:
 
----
+- Airtel Money or TNM Mpamba production adapters
+- settlement or withdrawal workflows
+- double-entry ledger posting
+- routine payment reconciliation jobs
+- durable asynchronous worker infrastructure for retries and webhooks
+- production deployment hardening or multi-service operations
 
-## 12. Security Boundaries
+The architecture is therefore current and valid for the implemented code, but it is not a complete production payment platform design document.
 
-The Solaris API is exposed to merchant applications, while provider integrations communicate with external payment networks.
-
-```text
-Merchant
-   │
- HTTPS
-   ▼
-Solaris API
-   │
-   ├── Authentication
-   ├── Authorization
-   ├── Validation
-   └── Rate Limiting
-   │
-   ▼
-Provider Layer
-   │
-   ▼
-External Providers
-```
-
-Sensitive information should be protected throughout the system.
-
-This includes:
-
-* API credentials
-* Provider credentials
-* Authentication tokens
-* Webhook secrets
-* Payment information
-* Database credentials
-
-Secrets must be supplied through environment configuration or an appropriate secrets-management mechanism and must never be committed to source control.
-
----
-
-## 13. Development Infrastructure
-
-The current development environment is intentionally lightweight.
-
-```text
-                    Development Machine
-                           │
-                    Docker Compose
-                     ┌─────┴─────┐
-                     │           │
-                     ▼           ▼
-                Solaris API   Redis
-                     │
-                     │
-                     ▼
-               Neon PostgreSQL
-```
-
-The API and Redis run through Docker Compose.
-
-PostgreSQL is provided through the shared Neon development database rather than a local PostgreSQL container.
-
-This keeps the local development environment lightweight while allowing the team to work against a shared development database.
-
----
-
-## 14. Frontend Separation
-
-The Solaris frontend is intentionally separate from the payment API.
-
-```text
-                ┌──────────────┐
-                │ React Client │
-                └──────┬───────┘
-                       │
-                       │ HTTPS
-                       ▼
-                ┌──────────────┐
-                │ Solaris API │
-                └──────────────┘
-```
-
-The backend remains API-first so that different clients can consume the same payment infrastructure.
-
-Potential clients include:
-
-* Merchant web applications
-* Merchant mobile applications
-* Internal administration tools
-* Other systems integrating through the Solaris API
-
----
-
-## 15. Architectural Direction
-
-The architecture is intentionally designed to evolve.
-
-The immediate priority is to establish a reliable modular backend rather than prematurely introduce distributed infrastructure.
-
-The expected progression is:
-
-```text
-Modular Monolith
-       │
-       ▼
-Provider Abstraction
-       │
-       ▼
-Reliable Payment Lifecycle
-       │
-       ▼
-Asynchronous Processing
-       │
-       ▼
-Reconciliation
-       │
-       ▼
-Production Infrastructure
-```
-
-Microservices, additional infrastructure, and other distributed-system patterns should only be introduced when the scale or operational requirements justify their complexity.
-
----
-
-## 16. Key Architectural Principles
-
-The current architecture follows these principles:
-
-1. **API first** — merchant integrations communicate through a consistent API.
-2. **Provider agnostic** — provider-specific logic remains isolated.
-3. **Modular** — business domains have clear boundaries.
-4. **Persistent** — financial state is stored durably.
-5. **Idempotent** — retries must not create duplicate transactions.
-6. **Asynchronous where appropriate** — long-running work should not unnecessarily block API requests.
-7. **Reconciliable** — Solaris records must be verifiable against provider records.
-8. **Secure by design** — credentials and sensitive payment information require explicit protection.
-9. **Simple until necessary** — infrastructure complexity should be introduced only when the system requires it.
-10. **Extensible** — new payment providers should be addable without redesigning the core payment domain.
+## 7. Design direction
+
+The project is intentionally a modular monolith for now. It keeps separate business domains and allows later extraction if the operational need becomes real. The codebase already reflects this boundary-oriented structure without requiring distributed services today.

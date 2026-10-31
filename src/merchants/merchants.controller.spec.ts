@@ -3,6 +3,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 
 import { MerchantsController } from './merchants.controller.js';
 import { MerchantsService } from './merchants.service.js';
+import { MerchantDocumentsService } from './merchant-documents.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 
 describe('MerchantsController', () => {
@@ -12,6 +13,12 @@ describe('MerchantsController', () => {
         getMyProfile: vi.fn(),
         updateProfile: vi.fn(),
         submitForReview: vi.fn(),
+    };
+
+    const mockMerchantDocumentsService = {
+        requestUpload: vi.fn(),
+        completeUpload: vi.fn(),
+        listDocuments: vi.fn(),
     };
 
     const MERCHANT_ID = 'merchant-uuid';
@@ -25,6 +32,10 @@ describe('MerchantsController', () => {
                 {
                     provide: MerchantsService,
                     useValue: mockMerchantsService,
+                },
+                {
+                    provide: MerchantDocumentsService,
+                    useValue: mockMerchantDocumentsService,
                 },
             ],
         }).compile();
@@ -132,6 +143,48 @@ describe('MerchantsController', () => {
             await expect(
                 controller.submitForReview(MERCHANT_ID),
             ).rejects.toThrow('Profile cannot be submitted');
+        });
+    });
+
+    describe('document routes', () => {
+        it('requests a document upload URL for the authenticated merchant', async () => {
+            const dto = { type: 'NATIONAL_ID_FRONT', contentType: 'image/jpeg' } as any;
+            const response = { uploadId: 'upload-1', uploadUrl: 'https://example.com/upload' };
+
+            mockMerchantDocumentsService.requestUpload.mockResolvedValue(response);
+
+            await expect(
+                controller.requestDocumentUpload(MERCHANT_ID, dto),
+            ).resolves.toEqual(response);
+
+            expect(mockMerchantDocumentsService.requestUpload).toHaveBeenCalledWith(
+                MERCHANT_ID,
+                dto,
+            );
+        });
+
+        it('completes a pending upload for the authenticated merchant', async () => {
+            const response = { id: 'document-1', status: 'PENDING' };
+            mockMerchantDocumentsService.completeUpload.mockResolvedValue(response);
+
+            await expect(
+                controller.completeDocumentUpload(MERCHANT_ID, 'upload-1'),
+            ).resolves.toEqual(response);
+
+            expect(mockMerchantDocumentsService.completeUpload).toHaveBeenCalledWith(
+                MERCHANT_ID,
+                'upload-1',
+            );
+        });
+
+        it('lists merchant documents', async () => {
+            const documents = [{ id: 'document-1', isCurrent: true }];
+            mockMerchantDocumentsService.listDocuments.mockResolvedValue(documents);
+
+            await expect(controller.listDocuments(MERCHANT_ID)).resolves.toEqual(documents);
+            expect(mockMerchantDocumentsService.listDocuments).toHaveBeenCalledWith(
+                MERCHANT_ID,
+            );
         });
     });
 });

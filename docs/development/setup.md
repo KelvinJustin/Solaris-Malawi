@@ -1,42 +1,34 @@
 # Development Setup
 
-> **Status:** Draft
-> **Last Updated:** October 2026
+This document describes the setup used by the current Solaris Malawi repository.
 
-This document explains how to set up the Solaris Malawi development environment locally.
+## 1. Current stack
 
-## 1. Development Stack
+| Component | Technology |
+|---|---|
+| Runtime | Node.js 24 |
+| Language | TypeScript |
+| Backend | NestJS 12 |
+| Database | PostgreSQL |
+| ORM | Prisma 7 |
+| Cache / infrastructure | Redis |
+| Object storage | Cloudflare R2 |
+| Testing | Vitest |
+| Container orchestration | Docker Compose |
 
-The current development environment consists of:
-
-| Component               | Technology      |
-| ----------------------- | --------------- |
-| Runtime                 | Node.js 24+     |
-| Language                | TypeScript      |
-| Backend                 | NestJS          |
-| Database                | PostgreSQL      |
-| ORM                     | Prisma 7        |
-| Database Hosting        | Neon PostgreSQL |
-| Cache / Infrastructure  | Redis           |
-| Testing                 | Vitest          |
-| Containers              | Docker          |
-| Container Orchestration | Docker Compose  |
-
-PostgreSQL is hosted through **Neon** during development. The local Docker environment runs the Solaris API and Redis.
-
----
+The project does not ship with a bundled PostgreSQL container in Docker Compose. The application expects a reachable database configured through `DATABASE_URL`.
 
 ## 2. Prerequisites
 
-Install the following:
+Install:
 
-* Node.js 24+
-* npm
-* Git
-* Docker
-* Docker Compose
+- Node.js 24+
+- npm
+- Git
+- Docker and Docker Compose
+- PostgreSQL access for the configured `DATABASE_URL`
 
-Verify the installations:
+Verify:
 
 ```bash
 node --version
@@ -46,83 +38,56 @@ docker --version
 docker compose version
 ```
 
-The exact Docker installation may differ between operating systems. Docker Desktop is not required if Docker Engine and Compose are available through another environment such as WSL.
-
----
-
-## 3. Clone the Repository
-
-Clone the repository:
+## 3. Clone and install
 
 ```bash
 git clone https://github.com/KelvinJustin/Solaris-Malawi.git
 cd Solaris-Malawi
-```
-
----
-
-## 4. Install Dependencies
-
-Install the project dependencies:
-
-```bash
 npm install
 ```
 
-Do not commit `node_modules` to the repository.
+## 4. Environment configuration
 
----
-
-## 5. Environment Configuration
-
-Create a local environment file from the example:
+Create a local `.env` file from the repo example:
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows PowerShell, the equivalent is:
+On Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-The `.env` file contains local development configuration and must not be committed.
-
-At minimum, configure the database and Redis connection details required by the application.
-
-Example:
+At minimum, the app uses the following configuration keys from `.env.example`:
 
 ```env
-DATABASE_URL="your-neon-database-url"
-
-REDIS_HOST="localhost"
-REDIS_PORT="6379"
-
-PORT="3000"
+PORT=3000
+NODE_ENV=development
+DATABASE_URL="postgresql://user:password@localhost:5432/Solaris?schema=public"
+JWT_SECRET=REPLACE_WITH_A_RANDOM_SECRET
+OTP_SECRET=REPLACE_WITH_A_SEPARATE_RANDOM_SECRET
+ENCRYPTION_SALT=12
+SMTP_SERVER=127.0.0.1
+SMTP_PORT=1025
+SMTP_USER=
+SMTP_API_KEY=
+SMTP_FROM="Solaris Malawi <no-reply@Solaris.local>"
+ARCJET_KEY=REPLACE_WITH_YOUR_ARCJET_KEY
+R2_ACCOUNT_ID="your-cloudflare-account-id"
+R2_ACCESS_KEY_ID="your-r2-access-key"
+R2_SECRET_ACCESS_KEY="your-r2-secret-key"
+R2_BUCKET_NAME="solaris-kyc-documents"
+CHECKOUT_TOKEN_ENCRYPTION_KEY=REPLACE_WITH_A_GENERATED_BASE64_KEY
+CHECKOUT_BASE_URL=http://localhost:3000/v1
+TEST_PROVIDER_BASE_URL=https://solaris-test-provider.onrender.com
+SIGNING_SECRET=REPLACE_WITH_A_SIGNING_SECRET
 ```
 
-> The exact environment variables may change as the application develops. Refer to `.env.example` as the source of truth for required configuration.
+Never commit `.env` or real secrets.
 
----
-
-## 6. Database
-
-Solaris currently uses a shared **Neon PostgreSQL development database**.
-
-The database is not included in Docker Compose.
-
-```text
-Solaris API
-     │
-     ▼
-   Prisma
-     │
-     ▼
-Neon PostgreSQL
-```
-
-After configuring `DATABASE_URL`, Prisma commands can be run from the project root.
+## 5. Prisma and database setup
 
 Generate the Prisma client:
 
@@ -130,367 +95,84 @@ Generate the Prisma client:
 npx prisma generate
 ```
 
-When database schema changes are introduced, use the appropriate Prisma migration or schema workflow defined by the project.
+Apply migrations:
 
-For full details on Prisma 7 driver adapters, NestJS `DatabaseService`, migrations, and best practices, see the dedicated guide:
-* [Database Setup & Prisma 7 Guide](../database/setup.md)
+```bash
+npx prisma migrate deploy
+```
 
-Do not commit database credentials or other secrets.
+If the schema has changed during development, create a migration with:
 
----
+```bash
+npx prisma migrate dev --name <migration_name>
+```
 
-## 7. Running Without Docker
-
-The API can be run directly from Node.js:
+## 6. Run the app without Docker
 
 ```bash
 npm run start:dev
 ```
 
-This starts NestJS in development/watch mode.
+The server runs on the configured port, usually `http://localhost:3000`.
 
-The API runs on:
+## 7. Run with Docker Compose
 
-```text
-http://localhost:3000
-```
-
-The exact port can be changed through the environment configuration.
-
----
-
-## 8. Running With Docker
-
-Docker Compose is the recommended development environment.
-
-Start the application and Redis:
+This repo includes a Docker Compose setup for Redis and the API:
 
 ```bash
 docker compose up --build
 ```
 
-The development architecture is:
+The Compose file exposes:
 
-```text
-                 Neon PostgreSQL
-                       ▲
-                       │
-                 Solaris API
-                       │
-                       ▼
-                Redis Container
-```
+- API on `3000`
+- Redis on `6379`
 
-The API source directory is mounted into the container during development.
+The API container still depends on the host environment to reach a PostgreSQL instance through `DATABASE_URL`.
 
-NestJS watches the source files and recompiles changes automatically.
-
-### Start in the background
-
-```bash
-docker compose up -d
-```
-
-### View logs
-
-```bash
-docker compose logs -f
-```
-
-View only the API logs:
-
-```bash
-docker compose logs -f api
-```
-
-### Stop the environment
-
-```bash
-docker compose down
-```
-
-### Rebuild containers
-
-Use a rebuild when changing dependencies, the Dockerfile, or other container configuration:
-
-```bash
-docker compose build
-docker compose up
-```
-
----
-
-## 9. Development Workflow
-
-A typical development session is:
-
-```text
-1. Pull the latest changes
-        │
-        ▼
-2. Install/update dependencies if required
-        │
-        ▼
-3. Configure .env
-        │
-        ▼
-4. Start Docker Compose
-        │
-        ▼
-5. Develop and test
-        │
-        ▼
-6. Run tests
-        │
-        ▼
-7. Commit changes
-        │
-        ▼
-8. Push to GitHub
-```
-
-Before starting work:
-
-```bash
-git pull
-```
-
-Start the development environment:
-
-```bash
-docker compose up
-```
-
-After making changes, run the relevant tests:
-
-```bash
-npm run test
-```
-
-Then check the repository:
-
-```bash
-git status
-```
-
----
-
-## 10. Testing
-
-Run the unit test suite:
-
-```bash
-npm run test
-```
-
-Run tests in watch mode:
-
-```bash
-npm run test:watch
-```
-
-Run end-to-end tests:
-
-```bash
-npm run test:e2e
-```
-
-Run tests with coverage:
-
-```bash
-npm run test:cov
-```
-
-Tests should be added alongside new functionality rather than being postponed until the end of a feature.
-
----
-
-## 11. Common Docker Commands
-
-Check running containers:
+Useful commands:
 
 ```bash
 docker compose ps
-```
-
-View API logs:
-
-```bash
 docker compose logs -f api
-```
-
-View Redis logs:
-
-```bash
 docker compose logs -f redis
-```
-
-Restart the API:
-
-```bash
-docker compose restart api
-```
-
-Stop and remove the development containers:
-
-```bash
 docker compose down
-```
-
-Stop the environment and remove its named volumes:
-
-```bash
 docker compose down -v
 ```
 
-> Be careful with `-v`. It removes Docker-managed volumes associated with the Compose project.
-
----
-
-## 12. Git Workflow
-
-The repository uses the `main` branch for the current development workflow.
-
-Before starting work:
+## 8. Typical workflow
 
 ```bash
 git pull
-```
-
-After making changes:
-
-```bash
-git status
-git add .
-git commit -m "TYPE: description"
-git push
-```
-
-Example:
-
-```bash
-git add .
-git commit -m "FEAT: add payment module"
-git push
-```
-
-Keep commits focused on a logical change rather than combining unrelated changes.
-
----
-
-## 13. Environment and Security Rules
-
-Never commit:
-
-* `.env`
-* Database credentials
-* API keys
-* Provider credentials
-* Private keys
-* Authentication secrets
-* Webhook signing secrets
-
-The repository should contain `.env.example` with placeholder values where configuration needs to be documented.
-
-```text
-.env.example    → committed
-.env            → local only
-```
-
-If a secret is accidentally committed, removing it from the latest commit is not sufficient if it has already been pushed. The affected credential should be considered compromised and rotated.
-
----
-
-## 14. Troubleshooting
-
-### API container does not start
-
-Check the logs:
-
-```bash
-docker compose logs -f api
-```
-
-Then verify:
-
-* Environment variables
-* Database connection
-* Redis availability
-* Node/npm dependencies
-* Docker build output
-
-### Changes are not being detected
-
-Confirm that the API is running through the development command:
-
-```bash
+npm install
+cp .env.example .env
+npx prisma generate
+npm run test
 npm run start:dev
 ```
 
-or through Docker Compose:
+## 9. Testing and quality checks
 
 ```bash
-docker compose up
+npm run test
+npm run test:watch
+npm run test:cov
+npm run test:e2e
+npm run build
 ```
 
-The Docker development configuration mounts the source code into the container and configures TypeScript file watching for the containerized development environment.
+The backend uses Vitest, but the project still benefits from broader integration tests around database transactions, provider behavior, and callback edge cases.
 
-### Prisma client is unavailable
+## 10. Security and operational rules
 
-Run:
+Do not commit:
 
-```bash
-npx prisma generate
-```
+- `.env`
+- database credentials
+- provider credentials
+- private keys
+- API keys
+- JWT or OTP secrets
+- webhook signing secrets
 
-Then restart the development environment if necessary.
-
-### Redis is unavailable
-
-Check:
-
-```bash
-docker compose ps
-```
-
-and:
-
-```bash
-docker compose logs redis
-```
-
-Redis should report that it is ready to accept connections.
-
----
-
-## 15. Development Environment Summary
-
-```text
-┌─────────────────────────────────────────────┐
-│              Development Machine            │
-│                                             │
-│  ┌───────────────────────────────────────┐  │
-│  │           Docker Compose              │  │
-│  │                                       │  │
-│  │  ┌─────────────┐    ┌─────────────┐  │  │
-│  │  │ Solaris API│    │    Redis    │  │  │
-│  │  │   NestJS    │◄──►│             │  │  │
-│  │  └──────┬──────┘    └─────────────┘  │  │
-│  └─────────┼─────────────────────────────┘  │
-│            │                                │
-└────────────┼────────────────────────────────┘
-             │
-             ▼
-      Neon PostgreSQL
-```
-
-The development environment intentionally keeps the infrastructure simple:
-
-* **NestJS** runs the API.
-* **Redis** runs locally through Docker.
-* **PostgreSQL** is provided by Neon.
-* **Prisma** manages database access.
-* **Docker Compose** provides a consistent local development environment.
-* **Vitest** provides automated testing.
-
-As the platform develops, this document should be updated when the development workflow or infrastructure changes.
+If a secret is accidentally exposed, rotate it and remove it from the repository history before continuing.

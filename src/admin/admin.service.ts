@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 
 import { DatabaseService } from '../database/database.service.js';
+import { R2StorageService } from '../storage/r2-storage.service.js';
 import {
   AccountStatus,
   DocumentStatus,
@@ -18,6 +19,7 @@ import { getDocumentRequirements } from '../merchants/document-requirements.js';
 export class AdminService {
   constructor(
     private readonly databaseService: DatabaseService,
+    private readonly r2StorageService: R2StorageService,
   ) { }
 
 
@@ -263,7 +265,7 @@ export class AdminService {
       }
 
       // Retrieve the document requirements specific to the merchant's business type.
-     const requirements = getDocumentRequirements(profile.businessType);
+      const requirements = getDocumentRequirements(profile.businessType);
 
       // Cache the current timestamp to consistently evaluate document expiration.
       const now = new Date();
@@ -386,7 +388,7 @@ export class AdminService {
     });
   }
 
-  
+
   /**
    * Rejects a merchant application that is currently under review.
    *
@@ -469,6 +471,48 @@ export class AdminService {
         message: 'Merchant application rejected.',
       };
     });
+  }
+
+
+  async createDocumentPreviewUrl(
+    profileId: string,
+    documentId: string,
+  ) {
+    const document = await this.databaseService.merchantDocument.findFirst({
+      where: {
+        id: documentId,
+        profileId,
+      },
+      select: {
+        id: true,
+        fileKey: true,
+        type: true,
+        status: true,
+        mimeType: true,
+        fileSizeBytes: true,
+      },
+    });
+
+    if (!document) {
+      throw new NotFoundException('Merchant document not found');
+    }
+
+    const previewUrl = await this.r2StorageService.createDownloadUrl(
+      document.fileKey,
+      300,
+    );
+
+    return {
+      document: {
+        id: document.id,
+        type: document.type,
+        status: document.status,
+        mimeType: document.mimeType,
+        fileSizeBytes: document.fileSizeBytes,
+      },
+      previewUrl,
+      expiresInSeconds: 300,
+    };
   }
 
 
