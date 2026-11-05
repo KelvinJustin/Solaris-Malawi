@@ -491,21 +491,46 @@ describe('AuthController email verification', () => {
     await app?.close();
   });
 
-  it.each(['Email verified successfully', 'Email already verified'])(
-    'returns "%s" without changing an existing access_token cookie',
-    async (message) => {
-      authService.verifyEmail.mockResolvedValue({ message });
-      const dto = { email: 'merchant@example.com', code: '123456' };
+  it('starts the session: sets the HttpOnly access_token cookie and never returns the token', async () => {
+    authService.verifyEmail.mockResolvedValue({
+      message: 'Email verified successfully',
+      accessToken: 'signed.jwt.token',
+    });
+    const dto = { email: 'merchant@example.com', code: '123456' };
 
-      const response = await request(app.getHttpServer())
-        .post('/auth/verify-email')
-        .set('Cookie', 'access_token=existing-session')
-        .send(dto)
-        .expect(201);
+    const response = await request(app.getHttpServer())
+      .post('/auth/verify-email')
+      .send(dto)
+      .expect(201);
 
-      expect(response.body).toEqual({ message });
-      expect(response.headers['set-cookie']).toBeUndefined();
-      expect(authService.verifyEmail).toHaveBeenCalledWith(dto);
-    },
-  );
+    expect(response.body).toEqual({
+      message: 'Email verified successfully',
+      redirectTo: '/home',
+    });
+    const cookies = response.headers['set-cookie'] as unknown as string[];
+    expect(cookies).toHaveLength(1);
+    expect(cookies[0]).toContain('access_token=signed.jwt.token');
+    expect(cookies[0]).toContain('HttpOnly');
+    expect(authService.verifyEmail).toHaveBeenCalledWith(dto);
+  });
+});
+
+describe('AuthController.getProfile', () => {
+  it('returns only the merchant identity, not the token metadata', () => {
+    const controller = new AuthController({} as AuthService);
+
+    const result = controller.getProfile({
+      user: {
+        userId: 'merchant-123',
+        email: 'merchant@example.com',
+        jti: 'token-identifier',
+        exp: 1893456000,
+      },
+    } as never);
+
+    expect(result).toEqual({
+      userId: 'merchant-123',
+      email: 'merchant@example.com',
+    });
+  });
 });

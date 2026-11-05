@@ -3,7 +3,7 @@
 **Document:** Authentication API Contract
 **Backend:** NestJS REST API
 **Frontend:** Separate React application
-**Development API URL:** `http://localhost:3000`
+**Development API URL:** `http://localhost:3000/v1` (every route is under the `/v1` URI version prefix)
 **Authentication:** JWT in an HTTP-only cookie
 
 ---
@@ -15,7 +15,9 @@ Solaris uses a **two-step MFA flow** followed by cookie-based JWT authentication
 - **Step 1** (`POST /auth/login`): validates email/password and emails a one-time 6-digit code.
 - **Step 2** (`POST /auth/verify-login`): validates the OTP and issues the `access_token` HTTP-only cookie.
 
-Email must be verified via `POST /auth/verify-email` before login is permitted.
+Registration is completed with `POST /auth/verify-email`: a correct emailed code verifies the address AND starts the session (HTTP-only `access_token` cookie), so the merchant goes straight to their home page. Email must be verified before password login is permitted. A new code can be requested with `POST /auth/resend-verification`.
+
+> All paths in this document are relative to `/v1` (e.g. `POST /auth/login` is `POST /v1/auth/login`).
 
 The JWT strategy accepts tokens from two sources: the `access_token` cookie, or an `Authorization: Bearer <token>` header. Browser clients should rely on the cookie.
 
@@ -25,10 +27,11 @@ The JWT strategy accepts tokens from two sources: the `access_token` cookie, or 
 |---|---|---|---|
 | `POST` | `/auth/register` | Create a merchant account | No |
 | `POST` | `/auth/verify-email` | Verify email address with OTP | No |
+| `POST` | `/auth/resend-verification` | Email a fresh verification code | No |
 | `POST` | `/auth/login` | Step 1: validate credentials, send OTP | No |
 | `POST` | `/auth/verify-login` | Step 2: validate OTP, issue JWT cookie | No |
 | `GET` | `/auth/me` | Retrieve current merchant identity | Yes |
-| `POST` | `/auth/logout` | Clear the auth cookie | Yes |
+| `POST` | `/auth/logout` | Revoke the token and clear the auth cookie | Yes |
 
 All endpoints are protected by `ArcjetGuard` (rate limiting, bot detection) at the controller level. `/auth/me` stacks `ArcjetGuard` then `JwtAuthGuard` explicitly — order matters, Arcjet runs first.
 
@@ -83,7 +86,7 @@ The frontend must:
 **Frontend behavior:**
 1. Validate fields before submitting.
 2. On success, inform the merchant to check their email and redirect to the verify-email step.
-3. Registration does not create an authenticated session.
+3. Registration itself does not create a session; the session starts when the emailed code is verified (section 2.2), after which the merchant is redirected to `/home`.
 
 ---
 
@@ -91,7 +94,7 @@ The frontend must:
 
 **`POST /auth/verify-email`**
 
-Must be completed before the merchant can log in.
+Final step of registration. Must be completed before the merchant can log in with a password.
 
 **Request body:**
 ```json
@@ -101,14 +104,15 @@ Must be completed before the merchant can log in.
 }
 ```
 
-**Successful response — `200 OK`:**
+**Successful response — `201 Created`** (also sets the HTTP-only `access_token` cookie; the token is never in the body):
 ```json
 {
   "message": "Email verified successfully"
 }
 ```
+The frontend then calls `GET /auth/me` and redirects to `/home`.
 
-If the email is already verified, the backend returns `{ "message": "Email is already verified" }` — this is treated as success.
+If the email is already verified, the backend answers `401` with the same generic invalid-code message (it never confirms account state).
 
 **Errors:**
 
@@ -119,7 +123,15 @@ If the email is already verified, the backend returns `{ "message": "Email is al
 
 **Notes:**
 - Codes are valid for 10 minutes.
-- After 5 failed attempts the challenge is locked — the merchant must re-register or request a new code.
+- After 5 failed attempts the challenge is locked — the merchant requests a new code with `POST /auth/resend-verification`.
+
+---
+
+### 2.2b Resend Verification Code
+
+**`POST /auth/resend-verification`** — body `{ "email": "merchant@example.com" }`.
+
+Always answers `200` with `{ "message": "If that account is awaiting verification, a new code has been sent" }` whether or not the account exists, is already verified, or is inside the cooldown (no account enumeration). At most one email per minute per account; older unused codes are invalidated. `503` if the email cannot be sent.
 
 ---
 
@@ -178,11 +190,12 @@ Validates the OTP. On success the backend issues the `access_token` cookie.
 **Successful response — `201 Created`** + `Set-Cookie: access_token=<jwt>`:
 ```json
 {
-  "accessToken": "eyJ..."
+  "message": "Login successful",
+  "redirectTo": "/home"
 }
 ```
 
-> ⚠️ The `accessToken` field in the body is a known inconsistency — the contract intention is cookie-only delivery. The frontend should rely on the cookie and ignore the body token. Confirm with the backend team whether the body field will be removed.
+The JWT is delivered only in the HTTP-only cookie, never in the body.
 
 **Errors:**
 
@@ -217,7 +230,7 @@ Returns the identity attached to the current JWT. Called on app start to restore
 }
 ```
 
-> Note: `jti` and `exp` are present in the JWT payload but are stripped by `JwtStrategy.validate()` before being attached to `request.user`. They are not returned here.
+> Note: `jti` and `exp` are present on `request.user` (logout needs them to revoke the token) but the controller returns only `userId` and `email`.
 
 **Errors:**
 
@@ -241,7 +254,7 @@ Returns the identity attached to the current JWT. Called on app start to restore
 
 Clears the `access_token` cookie. Requires a valid JWT.
 
-> ⚠️ **Known issue:** The controller clears the cookie and returns early — it does not call `authService.logout()`, so the JWT is **not added to the revoked-token table**. A copied token remains usable until it expires naturally. Raise with the backend team.
+The controller revokes the token's `jti` in the `revoked_tokens` table, then clears the cookie. A copied token is rejected (`401 Token has been revoked`) after logout.
 
 **Successful response — `200 OK`:**
 ```json
@@ -272,6 +285,7 @@ Clears the `access_token` cookie. Requires a valid JWT.
 | `secure` | `false` | `true` |
 | `sameSite` | `lax` | `lax` (confirm for deployment topology) |
 | `path` | `/` | `/` |
+| `maxAge` | 24h | 24h (matches the 1-day JWT) |
 
 Cookie lifetime and JWT expiration are separate controls — both must be configured to match the intended session duration.
 
@@ -282,12 +296,10 @@ Cookie lifetime and JWT expiration are separate controls — both must be config
 ### 4.1 API Base URL
 
 ```env
-VITE_API_URL=http://localhost:3000
+VITE_API_URL=http://localhost:3000   # origin only; the client appends /v1
 ```
 
-```typescript
-const API_URL = import.meta.env.VITE_API_URL;
-```
+The client (`frontend/src/lib/api.ts`) builds `API_URL = <VITE_API_URL>/v1`.
 
 ### 4.2 Sending Credentials
 
@@ -330,10 +342,6 @@ The backend must:
 | # | Issue | Location |
 |---|---|---|
 | 1 | Login is two steps (step 1 + step 2); original contract described a single-step login | `POST /auth/login`, `POST /auth/verify-login` |
-| 2 | `verifyLogin` returns `{ accessToken }` in the body alongside the cookie | `POST /auth/verify-login` |
-| 3 | Controller logout does not call `authService.logout()` — revoked-token table is never written | `POST /auth/logout` |
-| 4 | `jti` is absent from `request.user` but `authService.logout()` expects it — would panic if wired up | `AuthService.logout`, `AuthController.logout` |
-| 5 | `verifyEmail` uses unguarded `update()` on failed attempts; `verifyLogin` uses the safer guarded `updateMany()` | `AuthService.verifyEmail` |
 
 ---
 
@@ -345,8 +353,8 @@ The backend must:
 - Two-step MFA login
 - Cookie-based JWT authentication
 - Session restoration (`/auth/me`)
-- Logout (cookie clearing)
-- Token revocation table (implemented in service, not yet wired to controller)
+- Logout (token revocation + cookie clearing)
+- Resend of the email-verification code
 
 ### Not yet covered
 - Password reset
@@ -377,7 +385,7 @@ The backend must:
 - [ ] `/auth/me` returns merchant identity with a valid cookie.
 - [ ] Page refresh restores session while the token is valid.
 - [ ] Missing, invalid, or expired token returns `401` on protected endpoints.
-- [ ] Logout clears the cookie.
+- [ ] Logout clears the cookie and revokes the token (replaying it returns `401`).
 - [ ] `/auth/me` returns `401` after logout.
 - [ ] Network failures are handled separately from auth failures.
 - [ ] Credentialed CORS works from the configured React origin.

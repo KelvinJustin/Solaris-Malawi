@@ -23,6 +23,7 @@ import { RegisterAuthDto } from './dto/register-auth.dto.js';
 import { LoginAuthDto } from './dto/login-auth.dto.js';
 import { VerifyEmailDto } from './dto/verify-email.dto.js';
 import { VerifyLoginDto } from './dto/verify-login.dto.js';
+import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 // Guards: JwtAuthGuard checks the JWT cookie; ArcjetGuard blocks bots/abuse.
 import { JwtAuthGuard } from './jwt-auth.guard.js';
 import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
@@ -30,6 +31,9 @@ import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
 // Name of the cookie used to store the JWT. Defined once so "set" and
 // "clear" can never drift apart and leave a stale cookie behind.
 const COOKIE_NAME = 'access_token';
+
+// Frontend route of the merchant home page, returned after a successful sign-in.
+const MERCHANT_HOME = '/home';
 
 // Shared settings for creating and clearing the authentication cookie.
 const cookieOptions = {
@@ -54,6 +58,13 @@ const cookieOptions = {
   // any other route.
   path: '/',
 };
+
+// The cookie must live exactly as long as the JWT inside it ('1d' in
+// AuthModule). Without maxAge it would be a session cookie that dies when the
+// browser closes while the token is still valid. clearCookie() must NOT receive
+// maxAge, so it gets cookieOptions and set() gets setCookieOptions.
+const JWT_LIFETIME_MS = 24 * 60 * 60 * 1000;
+const setCookieOptions = { ...cookieOptions, maxAge: JWT_LIFETIME_MS };
 
 // @Controller('auth') → every route in this class is prefixed with /auth,
 // so @Post('login') becomes POST /auth/login.
@@ -100,24 +111,39 @@ export class AuthController {
     // Verify the one-time login code and generate an access token.
     const result = await this.authService.verifyLogin(dto);
     // Attach the newly generated JWT access token as an HTTP-only cookie on the response.
-    response.cookie(COOKIE_NAME, result.accessToken, cookieOptions);
+    response.cookie(COOKIE_NAME, result.accessToken, setCookieOptions);
     // Return a success message confirming the login operation.
-    return { message: 'Login successful' };
+    // A JSON API cannot redirect the browser itself, so name the page the client must open next.
+    return { message: 'Login successful', redirectTo: MERCHANT_HOME };
   }
 
-  // POST /auth/verify-email — verify ownership of the email address
-  // (link/code from the registration confirmation email).
+  // POST /auth/verify-email — final step of REGISTRATION: verify ownership of
+  // the email address with the emailed code. On success the merchant is signed
+  // in straight away (access_token cookie), so the frontend can send them to
+  // their home page.
   // Caveat: if this endpoint is reached via a GET link in an email,
   // corporate mail scanners pre-fetch links and may trip detectBot.
   // That flow should use Arcjet's email-validation instead of bot rules.
   @Post('verify-email')
   async verifyEmail(
     @Body() dto: VerifyEmailDto,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    // Delegate email verification processing to the authentication service.
+    // Verify the registration code, mark the email verified and mint a JWT.
     const result = await this.authService.verifyEmail(dto);
-    // Return the response message confirming the email verification status.
-    return { message: result.message }; // 'Email verified successfully' or 'Email already verified'
+    // Start the session: the JWT travels only in the HTTP-only cookie.
+    response.cookie(COOKIE_NAME, result.accessToken, setCookieOptions);
+    // The token itself is never returned in the body.
+    return { message: result.message, redirectTo: MERCHANT_HOME };
+  }
+
+  // POST /auth/resend-verification — send a fresh email-verification code.
+  // Needed because register() cannot be called twice (409) and a code
+  // expires after 10 minutes. Always answers with the same generic message.
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  resendVerification(@Body() dto: ResendVerificationDto) {
+    return this.authService.resendVerification(dto);
   }
 
   // GET /auth/me — return the currently logged-in user's identity.
@@ -144,8 +170,9 @@ export class AuthController {
       };
     },
   ) {
-    // Just hand back the identity the JWT strategy stamped on the request. 
-    return request.user;
+    // Return only the identity. request.user also carries jti/exp (needed by
+    // logout to revoke this exact token) but those are not for the client.
+    return { userId: request.user.userId, email: request.user.email };
   }
 
   // POST /auth/logout

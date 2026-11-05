@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { AuthLayout, Field, FormMessage } from "@/components/AuthLayout";
-import { ApiError, NetworkError } from "@/lib/api";
+import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { genericErrorMessage } from "@/lib/messages";
 
 export const Route = createFileRoute("/_guest/register")({
   head: () => ({ meta: [{ title: "Register — SmartPay Malawi" }] }),
@@ -10,12 +11,13 @@ export const Route = createFileRoute("/_guest/register")({
 });
 
 function registerErrorMessage(err: unknown): string {
-  if (err instanceof NetworkError) return "Can't reach the server. Check your connection and try again.";
   if (err instanceof ApiError) {
-    if (err.status === 409) return "That email is already registered. Try logging in instead.";
+    if (err.status === 409) return "That email or phone number is already registered. Try logging in instead.";
     if (err.status === 400) return err.message;
+    // The account exists but the code email failed; the verify screen can send a new code.
+    if (err.status === 503) return "Your account was created but we couldn't send the verification email. Log in to request a new code.";
   }
-  return "Something went wrong on our side. Please try again.";
+  return genericErrorMessage(err);
 }
 
 function Register() {
@@ -29,16 +31,17 @@ function Register() {
     const form = new FormData(e.currentTarget);
     setError(null);
     setSubmitting(true);
+    const email = String(form.get("email")).trim();
     try {
       await register({
         name: String(form.get("name")).trim(),
-        email: String(form.get("email")).trim(),
+        email,
         password: String(form.get("password")),
         // Backend validates a Malawi number; spaces from "+265 99 123 4567" are just noise.
         phone: String(form.get("phone")).replace(/[\s-]/g, ""),
       });
-      // Registration doesn't start a session, so send the merchant to log in.
-      await navigate({ to: "/", search: { registered: true } });
+      // Registration doesn't start a session. The backend emailed a 6-digit code: collect it next.
+      await navigate({ to: "/verify-email", search: { email } });
     } catch (err) {
       setError(registerErrorMessage(err));
       setSubmitting(false);
