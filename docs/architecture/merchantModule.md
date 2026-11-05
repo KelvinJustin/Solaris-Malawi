@@ -2,18 +2,19 @@
 
 ## 1. Overview
 
-The `merchants` module manages merchant business profiles and the initial Know Your Customer (KYC) application workflow for Solaris Malawi.
+The `merchants` module manages merchant business profiles, KYC document uploads, and the application review workflow for Solaris Malawi.
 
 It allows authenticated merchants to:
 
 - Retrieve their business profile and uploaded document records.
 - Update their business details while preparing an application.
-- Submit their application for administrative review.
+- Request pre-signed direct-to-cloud upload URLs for KYC documents.
+- Finalize uploaded documents with automatic size, MIME type, and magic-byte signature validation.
+- List all uploaded documents with current active versus superseded status.
+- Submit their application for administrative compliance review.
 - Correct and resubmit an application after rejection.
 
-The module uses NestJS, Prisma, and PostgreSQL. It relies on the existing merchant authentication system to identify the merchant making each request.
-
-**Important:** This module currently manages profile data and document records. It does not implement the actual document upload or cloud-storage workflow.
+The module is built with NestJS, Prisma, and PostgreSQL, and integrates with `StorageModule` (Cloudflare R2 via the S3-compatible API). It relies on merchant JWT authentication to identify the caller.
 
 ## 2. Responsibilities
 
@@ -21,14 +22,18 @@ The module is responsible for:
 
 - Retrieving the authenticated merchant's profile.
 - Updating editable business profile fields.
-- Enforcing profile status restrictions.
+- Enforcing profile status restrictions (`PENDING_SUBMISSION` or `REJECTED` for edits and uploads).
+- Generating short-lived (5-minute) pre-signed upload URLs for Cloudflare R2.
+- Verifying uploaded file size (0 < size <= 10 MiB) and MIME type.
+- Inspecting binary magic-byte signatures (PDF, PNG, JPEG) to prevent malicious file uploads.
+- Automatically superseding earlier document versions of the same type while retaining full audit records.
 - Checking required document types before submission.
 - Validating business name and business type.
 - Transitioning eligible profiles to `SUBMITTED`.
 - Recording profile status transitions in `MerchantReviewHistory`.
-- Using a database transaction to keep submission and its audit record consistent.
+- Using database transactions to guarantee consistency between application updates, documents, and audit logs.
 
-Administrator review, approval, and rejection are handled by the separate `admin` module.
+Administrator review, approval, rejection, and document preview are handled by the separate `admin` module.
 
 ## 3. Endpoints
 
@@ -39,6 +44,9 @@ All endpoints use the `/v1` API prefix and require merchant authentication throu
 | GET | `/v1/merchants/profile` | Retrieve the current merchant's profile and documents |
 | PATCH | `/v1/merchants/profile` | Update editable profile details |
 | POST | `/v1/merchants/profile/submit` | Submit the application for review |
+| POST | `/v1/merchants/documents/upload-url` | Request a pre-signed Cloudflare R2 upload URL |
+| POST | `/v1/merchants/documents/:uploadId/complete` | Complete and validate an uploaded KYC document |
+| GET | `/v1/merchants/documents` | List all uploaded documents for the merchant |
 
 The controller obtains the merchant ID through `@CurrentUser('userId')`. The client does not need to send a merchant ID in the request body or URL.
 
@@ -168,6 +176,129 @@ During the transaction, the service:
 
 If the status changes before the update succeeds, the operation is rejected rather than silently overwriting the competing change.
 
+### 3.4 Request Document Upload URL
+
+**Endpoint**
+
+`POST {{baseUrl}}/v1/merchants/documents/upload-url`
+
+**Request headers**
+
+`Content-Type: application/json`
+
+**Request body** (`RequestDocumentUploadDto`)
+
+```json
+{
+  "type": "BUSINESS_REGISTRATION",
+  "contentType": "application/pdf"
+}
+```
+
+- `type`: One of the valid `DocumentType` enum values (e.g. `NATIONAL_ID_FRONT`, `NATIONAL_ID_BACK`, `BUSINESS_REGISTRATION`, `TAX_CERTIFICATE`, `PROOF_OF_ADDRESS`, `DIRECTOR_ID`).
+- `contentType`: Allowed formats are `application/pdf`, `image/jpeg`, and `image/png`.
+
+**Profile status restrictions**
+
+Uploads are only permitted when `accountStatus` is `PENDING_SUBMISSION` or `REJECTED`. Attempting to request an upload URL while the application is `SUBMITTED`, `UNDER_REVIEW`, or `APPROVED` returns HTTP 400 Bad Request.
+
+**Successful response — HTTP 201 Created**
+
+```json
+{
+  "uploadId": "3b29c97b-9e4a-4a6f-99f5-e64e5c8e3325",
+  "uploadUrl": "https://<account-id>.r2.cloudflarestorage.com/solaris-kyc-documents/kyc/...",
+  "method": "PUT",
+  "contentType": "application/pdf",
+  "expiresAt": "2026-10-28T02:00:00.000Z",
+  "maxFileSizeBytes": 10485760
+}
+```
+
+The returned `uploadUrl` is a pre-signed S3 `PutObjectCommand` URL valid for **5 minutes**. The merchant client performs a direct HTTP `PUT` with the raw binary file to this URL.
+
+### 3.5 Complete Document Upload
+
+**Endpoint**
+
+`POST {{baseUrl}}/v1/merchants/documents/:uploadId/complete`
+
+**Request body:** None.
+
+**Authentication:** Required.
+
+**Purpose**
+
+Finalizes the upload process after the client has uploaded the file to Cloudflare R2.
+
+**Verification logic**
+
+1. Verifies that the upload intent (`uploadId`) exists for the merchant's profile, has not already been completed, and has not expired.
+2. Fetches object metadata from Cloudflare R2 via `HeadObjectCommand`.
+3. Validates file size: must be greater than 0 and less than or equal to 10 MiB (10,485,760 bytes).
+4. Validates that the uploaded `ContentType` matches the declared `expectedMimeType`.
+5. Reads the first 16 bytes of the object via range request and verifies the binary magic-byte signature:
+   - `application/pdf`: starts with `%PDF-` (`0x25, 0x50, 0x44, 0x46, 0x2d`)
+   - `image/png`: starts with PNG header (`0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a`)
+   - `image/jpeg`: starts with JPEG marker (`0xff, 0xd8, 0xff`)
+6. If any validation fails, the file is immediately deleted from R2 and HTTP 400 Bad Request is returned.
+7. Executes a Prisma transaction to:
+   - Create a new `MerchantDocument` with status `PENDING`, internal `fileUrl` (`r2://...`), and storage `fileKey`.
+   - Mark any existing active documents of the same `type` as superseded (`supersededAt: now()`, `supersededByDocumentId: document.id`).
+   - Mark the `MerchantDocumentUpload` intent as completed (`completedAt: now()`).
+
+**Successful response — HTTP 201 Created**
+
+```json
+{
+  "id": "e6754bfa-f6f7-4952-b8ec-f2369680376d",
+  "type": "BUSINESS_REGISTRATION",
+  "status": "PENDING",
+  "mimeType": "application/pdf",
+  "fileSizeBytes": 245120,
+  "uploadedAt": "2026-10-28T01:55:00.000Z"
+}
+```
+
+### 3.6 List Merchant Documents
+
+**Endpoint**
+
+`GET {{baseUrl}}/v1/merchants/documents`
+
+**Request body:** None.
+
+**Authentication:** Required.
+
+**Purpose**
+
+Retrieves all uploaded documents associated with the authenticated merchant's profile, ordered by `uploadedAt` descending.
+
+**Successful response — HTTP 200 OK**
+
+```json
+[
+  {
+    "id": "e6754bfa-f6f7-4952-b8ec-f2369680376d",
+    "type": "BUSINESS_REGISTRATION",
+    "status": "PENDING",
+    "mimeType": "application/pdf",
+    "fileSizeBytes": 245120,
+    "uploadedAt": "2026-10-28T01:55:00.000Z",
+    "updatedAt": "2026-10-28T01:55:00.000Z",
+    "rejectionNote": null,
+    "reviewedAt": null,
+    "supersededAt": null,
+    "supersededByDocumentId": null,
+    "isCurrent": true
+  }
+]
+```
+
+The response includes the computed field `isCurrent`, which is `true` if the document is active (`supersededAt === null && supersededByDocumentId === null`) and `false` if superseded by a newer upload.
+
+---
+
 ## 4. Business Types and Document Requirements
 
 The document policy helper in `document-requirements.ts` defines required and optional document types for each business category.
@@ -190,7 +321,7 @@ These are initial development rules, not definitive legal requirements for Malaw
 
 The current submission implementation considers a document eligible for satisfying a required type when:
 
-- Both `supersededAt` and `supersededByDocumentId` are null.
+- Both `supersededAt` and `supersededByDocumentId` are null (i.e. `isCurrent === true`).
 - Its status is not `REJECTED`.
 - Its status is not `EXPIRED`.
 - It has no expiry date, or its expiry date is in the future.
@@ -199,7 +330,7 @@ This means a document with status `PENDING` can satisfy the submission-stage che
 
 Superseded documents are excluded from submission validation, consistent with admin approval. They remain in the database for history and do not satisfy required document types.
 
-The service validates document records; it does not prove that a real file exists, is authentic, or has been securely stored.
+Document integrity and format authenticity are verified at upload completion by `MerchantDocumentsService` using Cloudflare R2 object metadata and binary magic-number signatures. Direct browser access is prevented; files in storage are identified via private object keys and internal URIs.
 
 ## 6. Application Lifecycle
 
@@ -321,31 +452,34 @@ Call any merchant endpoint without a valid authentication cookie.
 
 Verify that the request returns HTTP 401 Unauthorized.
 
-### Test 8 — Transaction Rollback
+### Test 8 — Document Upload Workflow
 
-Using an integration test with a real test database, deliberately cause the review-history insertion to fail during submission.
+1. Call `POST /v1/merchants/documents/upload-url` with `type: "NATIONAL_ID_FRONT"` and `contentType: "application/pdf"`.
+2. Extract `uploadUrl` and `uploadId`.
+3. Perform an HTTP `PUT` with binary PDF data to `uploadUrl`.
+4. Call `POST /v1/merchants/documents/{{uploadId}}/complete`.
+5. Verify that HTTP 201 is returned with document details.
+6. Call `GET /v1/merchants/documents` and verify `isCurrent: true`.
+7. Upload a second `NATIONAL_ID_FRONT`. Complete the upload.
+8. Call `GET /v1/merchants/documents` and verify the first document now has `isCurrent: false` (`supersededAt` populated), and the second has `isCurrent: true`.
 
-Verify that the profile status remains unchanged and that no partial submission is committed.
+### Test 9 — Invalid Document Upload Content
 
-Mock-based unit tests alone cannot prove PostgreSQL transaction rollback behaviour.
+1. Request an upload URL with `contentType: "application/pdf"`.
+2. Upload plain text or invalid non-PDF binary data to the pre-signed URL.
+3. Call `POST /v1/merchants/documents/{{uploadId}}/complete`.
+4. Verify HTTP 400 Bad Request is returned with `"The file contents do not match the declared format"`.
+5. Verify the corrupted file was purged from Cloudflare R2.
 
 ## 9. Current Scope and Limitations
 
-The module currently handles profile retrieval, editing, and submission, including validation that excludes superseded documents. It does not yet provide:
+The module handles profile retrieval, editing, direct-to-cloud KYC document uploads with Cloudflare R2, binary magic-byte validation, document supersession, and application submission. Areas for future extension include:
 
-- Document upload endpoints.
-- Cloud object-storage integration.
-- File type, size, and content validation.
-- Malware scanning.
-- Merchant-facing document replacement endpoints; supersession is already supported in document records and submission validation.
-- Merchant-facing document status management.
-- Merchant-facing rejection feedback workflows beyond profile retrieval and resubmission.
+- Antivirus/malware scanning pipeline on uploaded blobs.
+- Merchant-facing rejection feedback workflows for specific rejected documents.
+- Granular document expiry date management for merchant-supplied documents.
 - A definitive, compliance-approved Malawi KYC document policy.
 
-These should be implemented or confirmed as the project progresses.
+## 10. Summary
 
-## 11. Summary
-
-The `merchants` module provides the initial business-profile and KYC submission workflow for Solaris Malawi. It controls when merchants may edit their profiles, checks required document records, and records successful application submissions transactionally.
-
-Administrator review and final approval remain separate responsibilities. Submission and admin approval use the shared document policy and exclude superseded documents. Pending current documents may satisfy submission requirements, while approval requires approved current documents.
+The `merchants` module provides the merchant business-profile and KYC submission workflow for Solaris Malawi. It manages profile updates, direct-to-cloud document uploads via pre-signed Cloudflare R2 URLs, binary signature verification, and transactional submission tracking. Administrator review, approval, and preview access remain separate responsibilities in the `admin` module.

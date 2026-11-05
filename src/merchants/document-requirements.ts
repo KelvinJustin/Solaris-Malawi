@@ -15,7 +15,7 @@ export interface DocumentRequirements {
 }
 
 /**
- Initial Solaris document policy.
+ Initial document policy.
  
   These are development defaults, not a definitive statement
 */

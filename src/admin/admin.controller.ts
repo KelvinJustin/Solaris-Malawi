@@ -120,4 +120,18 @@ export class AdminController {
   }
 
 
+  @Get('merchant-applications/:profileId/documents/:documentId/preview')
+  @UseGuards(AdminJwtAuthGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.COMPLIANCE)
+  previewMerchantDocument(
+    @Param('profileId') profileId: string,
+    @Param('documentId') documentId: string,
+  ) {
+    return this.adminService.createDocumentPreviewUrl(
+      profileId,
+      documentId,
+    );
+  }
+
+
 }

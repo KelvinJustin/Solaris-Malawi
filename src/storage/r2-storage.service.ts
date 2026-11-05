@@ -1,0 +1,163 @@
+
+import {
+    DeleteObjectCommand,
+    GetObjectCommand,
+    HeadObjectCommand,
+    PutObjectCommand,
+    S3Client,
+} from '@aws-sdk/client-s3';
+import {
+    Injectable,
+    Logger,
+    OnModuleDestroy,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+@Injectable()
+export class R2StorageService implements OnModuleDestroy {
+    private readonly logger = new Logger(R2StorageService.name);
+    private readonly client: S3Client;
+    private readonly bucket: string;
+
+    constructor(config: ConfigService) {
+        const accountId = config.getOrThrow<string>('R2_ACCOUNT_ID');
+        this.bucket = config.getOrThrow<string>('R2_BUCKET_NAME');
+
+        this.client = new S3Client({
+            region: 'auto',
+            endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+            forcePathStyle: true,
+            credentials: {
+                accessKeyId: config.getOrThrow<string>('R2_ACCESS_KEY_ID'),
+                secretAccessKey: config.getOrThrow<string>('R2_SECRET_ACCESS_KEY'),
+            },
+        });
+
+        this.logger.log('R2 storage service initialized');
+    }
+
+    private async logged<T>(
+        operation: string,
+        action: () => Promise<T>,
+    ): Promise<T> {
+        const startedAt = Date.now();
+
+        try {
+            const result = await action();
+            this.logger.log(
+                `${operation} succeeded (${Date.now() - startedAt}ms)`,
+            );
+            return result;
+        } catch (error: unknown) {
+            const details =
+                typeof error === 'object' && error !== null
+                    ? (error as {
+                        name?: string;
+                        Code?: string;
+                        $metadata?: { httpStatusCode?: number };
+                    })
+                    : {};
+
+            this.logger.error(
+                `${operation} failed (${Date.now() - startedAt}ms): ` +
+                `code=${details.Code ?? details.name ?? 'Unknown'}, ` +
+                `httpStatus=${details.$metadata?.httpStatusCode ?? 'unknown'}`,
+            );
+
+            throw error;
+        }
+    }
+
+    async createUploadUrl(
+        key: string,
+        contentType: string,
+    ): Promise<string> {
+        return this.logged('createUploadUrl', async () => {
+            const command = new PutObjectCommand({
+                Bucket: this.bucket,
+                Key: key,
+                ContentType: contentType,
+            });
+
+            return getSignedUrl(this.client, command, {
+                expiresIn: 300,
+            });
+        });
+    }
+
+
+    async createDownloadUrl(
+        objectKey: string,
+        expiresInSeconds = 300,
+    ): Promise<string> {
+        const command = new GetObjectCommand({
+            Bucket: this.bucket,
+            Key: objectKey,
+        });
+
+        return getSignedUrl(this.client, command, {
+            expiresIn: expiresInSeconds,
+        });
+    }
+
+
+    async createPreviewUrl(key: string): Promise<string> {
+        return this.logged('createPreviewUrl', async () => {
+            const command = new GetObjectCommand({
+                Bucket: this.bucket,
+                Key: key,
+                ResponseContentDisposition: 'inline',
+            });
+
+            return getSignedUrl(this.client, command, {
+                expiresIn: 300,
+            });
+        });
+    }
+
+    async getObjectMetadata(key: string) {
+        return this.logged('getObjectMetadata', () =>
+            this.client.send(
+                new HeadObjectCommand({
+                    Bucket: this.bucket,
+                    Key: key,
+                }),
+            ),
+        );
+    }
+
+    async readFileSignature(key: string): Promise<Uint8Array> {
+        return this.logged('readFileSignature', async () => {
+            const response = await this.client.send(
+                new GetObjectCommand({
+                    Bucket: this.bucket,
+                    Key: key,
+                    Range: 'bytes=0-15',
+                }),
+            );
+
+            if (!response.Body) {
+                throw new Error('Uploaded object has no readable body');
+            }
+
+            return response.Body.transformToByteArray();
+        });
+    }
+
+    async deleteObject(key: string): Promise<void> {
+        return this.logged('deleteObject', async () => {
+            await this.client.send(
+                new DeleteObjectCommand({
+                    Bucket: this.bucket,
+                    Key: key,
+                }),
+            );
+        });
+    }
+
+    onModuleDestroy(): void {
+        this.client.destroy();
+        this.logger.log('R2 storage client closed');
+    }
+}

@@ -23,6 +23,7 @@ import { VerifyEmailDto } from './dto/verify-email.dto.js';
 import { VerifyLoginDto } from './dto/verify-login.dto.js';
 import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 import { UpdateAuthDto } from './dto/update-auth.dto.js';
+import { resolvePasswordHashCost } from '../password.js';
 
 // Minimum gap between verification emails for the same account.
 const RESEND_COOLDOWN_MS = 60 * 1000;
@@ -66,7 +67,7 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(
       password,
-      Number(process.env.ENCRYPTION_SALT),
+      resolvePasswordHashCost(),
     );
 
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');

@@ -24,7 +24,8 @@ The module is implemented using NestJS and Prisma, with PostgreSQL as the databa
 | `src/admin/admin.service.ts` | Implements application retrieval, status transitions, validation, and review decisions. |
 | `src/admin/admin.service.spec.ts` | Tests admin service behavior using mocked database operations. |
 | `src/admin/admin.controller.spec.ts` | Tests controller behavior, if present. |
-| `src/admin/admin.module.ts` | Registers the admin controller and service. |
+| `src/admin/admin.module.ts` | Registers the admin controller, service, and imports StorageModule. |
+| `src/storage/r2-storage.service.ts` | Provides pre-signed S3 download URLs for secure document inspection. |
 | `src/admin-auth/admin-jwt-auth.guard.ts` | Protects routes using admin authentication. |
 | `src/admin-auth/admin-roles.guard.ts` | Enforces route-level admin role restrictions. |
 | `src/admin-auth/admin-roles.decorator.ts` | Declares which admin roles may access a route. |
@@ -59,7 +60,7 @@ Admin authentication is separate from merchant authentication.
 
 Base route: `/v1/admin`
 
-All five endpoints require an authenticated admin session and the appropriate role.
+All six endpoints require an authenticated admin session and the appropriate role.
 
 ### 3.1 List merchant applications
 
@@ -372,6 +373,62 @@ The service:
 
 The controller validates the reason's type before calling the service, which trims it and rejects empty or whitespace-only reasons.
 
+### 3.6 Preview KYC Document
+
+**Endpoint**
+
+`GET /v1/admin/merchant-applications/:profileId/documents/:documentId/preview`
+
+**Purpose**
+
+Generates a secure, short-lived (5-minute) pre-signed download and preview URL for an uploaded merchant KYC document stored in Cloudflare R2. This allows compliance reviewers to inspect document images and PDFs directly in the browser without exposing the private storage bucket publicly.
+
+**Allowed roles**
+
+`SUPER_ADMIN`, `COMPLIANCE`
+
+**Path parameters**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `profileId` | UUID string | ID of the merchant profile that owns the document. |
+| `documentId` | UUID string | ID of the specific document record to preview. |
+
+**Example request**
+
+```http
+GET /v1/admin/merchant-applications/550e8400-e29b-41d4-a716-446655440000/documents/e6754bfa-f6f7-4952-b8ec-f2369680376d/preview
+```
+
+**Business logic**
+
+1. Queries `MerchantDocument` where `id === documentId` and `profileId === profileId`.
+2. Throws `404 Not Found` with message `"Merchant document not found"` if the document does not exist or does not belong to the given profile.
+3. Calls `R2StorageService.createDownloadUrl(document.fileKey, 300)` to generate a pre-signed S3 `GetObjectCommand` URL valid for 300 seconds.
+4. Returns document metadata, the pre-signed URL, and the TTL.
+
+**Success response — HTTP 200 OK**
+
+```json
+{
+  "document": {
+    "id": "e6754bfa-f6f7-4952-b8ec-f2369680376d",
+    "type": "BUSINESS_REGISTRATION",
+    "status": "PENDING",
+    "mimeType": "application/pdf",
+    "fileSizeBytes": 245120
+  },
+  "previewUrl": "https://<account-id>.r2.cloudflarestorage.com/solaris-kyc-documents/kyc/...",
+  "expiresInSeconds": 300
+}
+```
+
+**Possible errors**
+
+- `401 Unauthorized` — missing or invalid admin session/token.
+- `403 Forbidden` — insufficient admin role.
+- `404 Not Found` — merchant document not found for the given profile.
+
 ---
 
 ## 4. Merchant Application Lifecycle
@@ -506,6 +563,7 @@ The list currently includes applications in `SUBMITTED` and `UNDER_REVIEW` state
 - [x] Start-review endpoint.
 - [x] Approval endpoint.
 - [x] Rejection endpoint with a required reason.
+- [x] KYC document inspection and pre-signed preview URL generation via Cloudflare R2.
 - [x] Role restrictions on application review endpoints.
 - [x] Status-transition validation.
 - [x] Document validation during approval.
@@ -515,17 +573,15 @@ The list currently includes applications in `SUBMITTED` and `UNDER_REVIEW` state
 
 ### Not yet established by these endpoints alone
 
-- [ ] Merchant-facing rejection notification.
+- [ ] Merchant-facing rejection notification emails.
 - [ ] Merchant-facing rejection reason and recovery UI.
-- [ ] A complete resubmission workflow after rejection.
-- [ ] Actual document upload and replacement integration with object storage such as Cloudflare R2.
 - [ ] Database integration tests proving transaction rollback against PostgreSQL.
 - [ ] End-to-end tests covering the entire review workflow.
 - [ ] DTO-based validation and API documentation for request bodies.
 - [ ] A broader admin dashboard and admin account management API.
 - [ ] Production verification of KYC document requirements and retention policy.
 
-These items are not necessarily missing from the entire project; they are outside the five admin endpoints and service methods documented here.
+These items are not necessarily missing from the entire project; they are outside the six admin endpoints and service methods documented here.
 
 ---
 
@@ -566,7 +622,8 @@ Passing unit tests and a successful build provide confidence in the implementati
 | `POST` | `/v1/admin/merchant-applications/:profileId/start-review` | Move a submitted application into review. |
 | `POST` | `/v1/admin/merchant-applications/:profileId/approve` | Validate documents and approve an application. |
 | `POST` | `/v1/admin/merchant-applications/:profileId/reject` | Reject an application and record the reason. |
+| `GET` | `/v1/admin/merchant-applications/:profileId/documents/:documentId/preview` | Generate secure pre-signed preview URL for an uploaded KYC document. |
 
 All endpoints are protected by admin authentication and role guards. Application review actions are restricted to `SUPER_ADMIN` and `COMPLIANCE` under the current controller configuration.
 
-**Summary:** The current Admin module implements the core merchant application review lifecycle from retrieving submitted applications through approval or rejection. It combines role-based access control, KYC document validation, conditional status transitions, and transactional audit-history recording. Merchant resubmission, object-storage integration, and real-database transaction testing remain separate areas of work.
+**Summary:** The Admin module implements the merchant application review lifecycle from retrieving submitted applications, inspecting uploaded KYC documents via secure Cloudflare R2 pre-signed URLs, through approval or rejection. It combines role-based access control, KYC document validation, conditional status transitions, and transactional audit-history recording.

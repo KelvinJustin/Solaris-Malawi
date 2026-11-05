@@ -9,6 +9,7 @@ import { Test, type TestingModule } from '@nestjs/testing';
 
 import { AdminService } from './admin.service.js';
 import { DatabaseService } from '../database/database.service.js';
+import { R2StorageService } from '../storage/r2-storage.service.js';
 
 import {
   AccountStatus,
@@ -71,6 +72,16 @@ describe('AdminService', () => {
         {
           provide: DatabaseService,
           useValue: databaseService,
+        },
+        {
+          provide: R2StorageService,
+          useValue: {
+            createUploadUrl: vi.fn(),
+            createDownloadUrl: vi.fn(),
+            createPreviewUrl: vi.fn(),
+            getObjectMetadata: vi.fn(),
+            deleteObject: vi.fn(),
+          },
         },
       ],
     }).compile();

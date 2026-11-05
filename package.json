@@ -27,6 +27,8 @@
   "dependencies": {
     "@arcjet/inspect": "^1.14.1",
     "@arcjet/node": "^1.14.1",
+    "@aws-sdk/client-s3": "^3.1158.0",
+    "@aws-sdk/s3-request-presigner": "^3.1158.0",
     "@nestjs/common": "^12.0.1",
     "@nestjs/config": "^12.0.1",
     "@nestjs/core": "^12.0.1",
