@@ -1,7 +1,12 @@
 // Thin fetch wrapper for the SmartPay API.
 // The JWT lives in an HTTP-only cookie, so every request must send credentials.
 
-const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:3000").replace(/\/$/, "");
+// The backend mounts every route under a URI version prefix (see enableVersioning in src/main.ts),
+// so the real base is <origin>/v1. VITE_API_URL is the origin only; "/v1" is added here, and is
+// not duplicated if someone already put it in the env value.
+const API_ORIGIN = (import.meta.env.VITE_API_URL ?? "http://localhost:3000").replace(/\/+$/, "");
+const API_VERSION = "v1";
+export const API_URL = /\/v\d+$/.test(API_ORIGIN) ? API_ORIGIN : `${API_ORIGIN}/${API_VERSION}`;
 
 /** The server answered with a non-2xx status. */
 export class ApiError extends Error {

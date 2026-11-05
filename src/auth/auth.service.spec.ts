@@ -591,7 +591,7 @@ describe('AuthService', () => {
       });
     });
 
-    it('consumes a valid code and verifies the email without issuing a JWT', async () => {
+    it('consumes a valid code, verifies the email and issues a JWT (auto-login)', async () => {
       database.merchant.findUnique.mockResolvedValue({
         ...verifiedMerchant(),
         emailVerifiedAt: null,
@@ -625,10 +625,30 @@ describe('AuthService', () => {
         data: { emailVerifiedAt: expect.any(Date) },
       });
 
-      expect(result).toEqual({
-        message: 'Email verified successfully',
+      expect(jwtService.signAsync).toHaveBeenCalledWith({
+        sub: merchantId,
+        email,
+        jti: expect.any(String),
       });
 
+      expect(result).toEqual({
+        message: 'Email verified successfully',
+        accessToken: expect.any(String),
+      });
+    });
+
+    it('rejects a deleted merchant without touching the challenge', async () => {
+      database.merchant.findUnique.mockResolvedValue({
+        ...verifiedMerchant(),
+        emailVerifiedAt: null,
+        deletedAt: new Date(),
+      });
+
+      await expect(
+        service.verifyEmail({ email, code: '123456' }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(database.otpChallenge.findFirst).not.toHaveBeenCalled();
       expect(jwtService.signAsync).not.toHaveBeenCalled();
     });
 
@@ -655,6 +675,115 @@ describe('AuthService', () => {
   // ------------------------------------------------------------
   // LOGOUT
   // ------------------------------------------------------------
+
+  // ------------------------------------------------------------
+  // EMAIL VERIFICATION — RESEND
+  // ------------------------------------------------------------
+
+  describe('resendVerification', () => {
+    const genericMessage =
+      'If that account is awaiting verification, a new code has been sent';
+
+    const unverifiedMerchant = () => ({
+      ...verifiedMerchant(),
+      emailVerifiedAt: null,
+    });
+
+    it('returns the generic response for an unknown email without sending anything', async () => {
+      database.merchant.findUnique.mockResolvedValue(null);
+
+      await expect(service.resendVerification({ email })).resolves.toEqual({
+        message: genericMessage,
+      });
+
+      expect(database.otpChallenge.create).not.toHaveBeenCalled();
+      expect(emailService.sendVerificationCode).not.toHaveBeenCalled();
+    });
+
+    it('returns the generic response for an already verified merchant without sending anything', async () => {
+      database.merchant.findUnique.mockResolvedValue(verifiedMerchant());
+
+      await expect(service.resendVerification({ email })).resolves.toEqual({
+        message: genericMessage,
+      });
+
+      expect(database.otpChallenge.create).not.toHaveBeenCalled();
+      expect(emailService.sendVerificationCode).not.toHaveBeenCalled();
+    });
+
+    it('does not send another email inside the cooldown window', async () => {
+      database.merchant.findUnique.mockResolvedValue(unverifiedMerchant());
+      database.otpChallenge.findFirst.mockResolvedValue(
+        makeChallenge('123456', {
+          purpose: 'EMAIL_VERIFICATION',
+          createdAt: new Date(Date.now() - 10 * 1000),
+        }),
+      );
+
+      await expect(service.resendVerification({ email })).resolves.toEqual({
+        message: genericMessage,
+      });
+
+      expect(database.otpChallenge.create).not.toHaveBeenCalled();
+      expect(emailService.sendVerificationCode).not.toHaveBeenCalled();
+    });
+
+    it('invalidates older codes, stores a new hashed challenge and emails the code', async () => {
+      database.merchant.findUnique.mockResolvedValue(unverifiedMerchant());
+      database.otpChallenge.findFirst.mockResolvedValue(
+        makeChallenge('123456', {
+          purpose: 'EMAIL_VERIFICATION',
+          createdAt: new Date(Date.now() - 5 * 60 * 1000),
+        }),
+      );
+
+      await expect(service.resendVerification({ email })).resolves.toEqual({
+        message: genericMessage,
+      });
+
+      expect(database.otpChallenge.updateMany).toHaveBeenCalledWith({
+        where: {
+          merchantId,
+          purpose: 'EMAIL_VERIFICATION',
+          consumedAt: null,
+        },
+        data: { consumedAt: expect.any(Date) },
+      });
+
+      expect(emailService.sendVerificationCode).toHaveBeenCalledWith(
+        email,
+        expect.stringMatching(/^\d{6}$/),
+      );
+
+      // The plain code is emailed, only its HMAC is stored.
+      const sentCode = emailService.sendVerificationCode.mock.calls[0]![1] as string;
+      expect(database.otpChallenge.create).toHaveBeenCalledWith({
+        data: {
+          merchantId,
+          purpose: 'EMAIL_VERIFICATION',
+          codeHash: hashOtp(merchantId, sentCode),
+          expiresAt: expect.any(Date),
+        },
+      });
+    });
+
+    it('consumes the new challenge and reports failure if email delivery fails', async () => {
+      database.merchant.findUnique.mockResolvedValue(unverifiedMerchant());
+      database.otpChallenge.findFirst.mockResolvedValue(null);
+      emailService.sendVerificationCode.mockRejectedValue(
+        new Error('SMTP unavailable'),
+      );
+
+      await expect(
+        service.resendVerification({ email }),
+      ).rejects.toThrow(ServiceUnavailableException);
+
+      expect(database.otpChallenge.update).toHaveBeenCalledWith({
+        where: { id: 'otp-challenge-1' },
+        data: { consumedAt: expect.any(Date) },
+      });
+    });
+  });
 
   describe('logout', () => {
     it('stores the token ID and expiry for revocation', async () => {

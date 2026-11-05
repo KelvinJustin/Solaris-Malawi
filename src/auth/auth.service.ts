@@ -21,8 +21,12 @@ import { LoginAuthDto } from './dto/login-auth.dto.js';
 import { RegisterAuthDto } from './dto/register-auth.dto.js';
 import { VerifyEmailDto } from './dto/verify-email.dto.js';
 import { VerifyLoginDto } from './dto/verify-login.dto.js';
+import { ResendVerificationDto } from './dto/resend-verification.dto.js';
 import { UpdateAuthDto } from './dto/update-auth.dto.js';
 import { resolvePasswordHashCost } from '../password.js';
+
+// Minimum gap between verification emails for the same account.
+const RESEND_COOLDOWN_MS = 60 * 1000;
 
 @Injectable()
 export class AuthService {
@@ -284,22 +288,26 @@ export class AuthService {
   // EMAIL VERIFICATION (auto-login on success)
   // ============================================================
 
-  
-async verifyEmail(dto: VerifyEmailDto) {
+  // Registration flow: the merchant supplied their password at sign-up and
+  // now proves they own the mailbox with the emailed code. A correct code
+  // therefore completes sign-up AND starts the session, so the merchant lands
+  // on their home page without a second password + OTP round trip.
+  async verifyEmail(dto: VerifyEmailDto) {
   const { email, code } = dto;
 
   const merchant = await this.databaseService.merchant.findUnique({
     where: { email },
   });
 
-  if (!merchant) {
+  if (!merchant || merchant.deletedAt) {
     throw new UnauthorizedException(
       'Invalid or expired verification code',
     );
   }
 
   // Never issue an authentication token from email verification
-  // when the account is already verified.
+  // when the account is already verified (that would let a replayed or
+  // leaked code mint sessions for an account that finished sign-up).
   if (merchant.emailVerifiedAt) {
     throw new UnauthorizedException(
       'Invalid or expired verification code',
@@ -374,10 +382,92 @@ async verifyEmail(dto: VerifyEmailDto) {
     data: { emailVerifiedAt: new Date() },
   });
 
+  // The code was valid and single-use, so the session starts now.
+  const payload = {
+    sub: merchant.id,
+    email: merchant.email,
+    jti: randomUUID(),
+  };
+
   return {
     message: 'Email verified successfully',
+    accessToken: await this.jwtService.signAsync(payload),
   };
 }
+
+  // ============================================================
+  // EMAIL VERIFICATION — RESEND
+  // ============================================================
+
+  // Issues a fresh verification code for an account that registered but has
+  // not verified yet (code expired, locked after 5 attempts, or email lost).
+  //
+  // The response is intentionally identical whether or not the email exists,
+  // is already verified, or is inside the cooldown, so this endpoint cannot
+  // be used to discover which emails are registered.
+  async resendVerification(dto: ResendVerificationDto) {
+    const { email } = dto;
+    const generic = {
+      message:
+        'If that account is awaiting verification, a new code has been sent',
+    };
+
+    const merchant = await this.databaseService.merchant.findUnique({
+      where: { email },
+    });
+
+    if (!merchant || merchant.emailVerifiedAt || merchant.deletedAt) {
+      return generic;
+    }
+
+    // Cooldown: at most one new code per minute per account.
+    const latest = await this.databaseService.otpChallenge.findFirst({
+      where: { merchantId: merchant.id, purpose: 'EMAIL_VERIFICATION' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (
+      latest &&
+      Date.now() - latest.createdAt.getTime() < RESEND_COOLDOWN_MS
+    ) {
+      return generic;
+    }
+
+    // Invalidate older codes so only the newest one can verify the account.
+    await this.databaseService.otpChallenge.updateMany({
+      where: {
+        merchantId: merchant.id,
+        purpose: 'EMAIL_VERIFICATION',
+        consumedAt: null,
+      },
+      data: { consumedAt: new Date() },
+    });
+
+    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const challenge = await this.databaseService.otpChallenge.create({
+      data: {
+        merchantId: merchant.id,
+        purpose: 'EMAIL_VERIFICATION',
+        codeHash: this.hashOtp(merchant.id, code),
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+    });
+
+    try {
+      await this.emailService.sendVerificationCode(merchant.email, code);
+    } catch {
+      await this.databaseService.otpChallenge.update({
+        where: { id: challenge.id },
+        data: { consumedAt: new Date() },
+      });
+
+      throw new ServiceUnavailableException(
+        'Unable to send the verification email. Please try again.',
+      );
+    }
+
+    return generic;
+  }
 
   // ============================================================
   // LOGOUT
