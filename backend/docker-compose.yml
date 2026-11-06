@@ -1,0 +1,43 @@
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: Solaris-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+
+  redis:
+    image: redis:8-alpine
+    container_name: Solaris-redis
+    restart: unless-stopped
+    # Publish Redis to the host so the API can also be run outside Docker
+    # (npm run start:dev) and still reach it on localhost:6379.
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis_data:
