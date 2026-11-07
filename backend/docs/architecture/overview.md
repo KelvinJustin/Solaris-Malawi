@@ -2,6 +2,8 @@
 
 This document reflects the architecture currently implemented in the repository rather than a long-term idealized roadmap.
 
+The implementation also contains granular API documentation under [docs/architecture](./). For endpoint-level contract details, see [apiReference.md](./apiReference.md) and the module guides for [authContract.md](./authContract.md), [adminModule.md](./adminModule.md), [merchantModule.md](./merchantModule.md), and [transactionsModule.md](./transactionsModule.md).
+
 ## 1. Current system shape
 
 Solaris is a modular monolith built with NestJS, TypeScript, PostgreSQL, Prisma, and Redis. The backend is organized around feature modules instead of independent services.

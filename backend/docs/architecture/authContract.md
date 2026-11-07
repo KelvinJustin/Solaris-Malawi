@@ -32,6 +32,7 @@ The JWT strategy accepts tokens from two sources: the `access_token` cookie, or 
 | `POST` | `/auth/verify-login` | Step 2: validate OTP, issue JWT cookie | No |
 | `GET` | `/auth/me` | Retrieve current merchant identity | Yes |
 | `POST` | `/auth/logout` | Revoke the token and clear the auth cookie | Yes |
+| `DELETE` | `/auth/account` | Soft-delete the merchant account | Yes |
 
 All endpoints are protected by `ArcjetGuard` (rate limiting, bot detection) at the controller level. `/auth/me` stacks `ArcjetGuard` then `JwtAuthGuard` explicitly — order matters, Arcjet runs first.
 
@@ -273,6 +274,33 @@ The controller revokes the token's `jti` in the `revoked_tokens` table, then cle
 1. Send `POST /auth/logout` with `credentials: 'include'`.
 2. On success, clear in-memory merchant identity and navigate to the login page.
 3. Do not attempt to delete or overwrite the cookie from JavaScript.
+
+---
+
+### 2.7 Delete Account
+
+**`DELETE /auth/account`**
+
+Soft-deletes the authenticated merchant account and marks the profile as suspended so it cannot continue using the platform.
+
+**Authentication:** required (`access_token` cookie or equivalent JWT bearer token)
+
+**Request body:** none
+
+**Successful response — `200 OK`**
+```json
+{
+  "message": "Account deleted successfully"
+}
+```
+
+**Errors:**
+
+| Status | Meaning |
+|---|---|
+| `401 Unauthorized` | No valid JWT present or account not found |
+
+This endpoint is intentionally soft-delete only: the merchant record is not hard-removed from the database because financial and compliance history must remain auditable.
 
 ---
 
