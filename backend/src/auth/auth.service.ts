@@ -41,6 +41,13 @@ export class AuthService {
   // SHARED OTP UTILITIES
   // ============================================================
 
+  /**
+   * Hashes a merchant OTP using a server-side secret so the database stores
+   * only the derived value and never the raw one-time code.
+   *
+   * We deliberately keep the comparison logic in the same service so the
+   * verification flow remains centralized and easier to reason about.
+   */
   private hashOtp(merchantId: string, code: string): string {
     return createHmac(
       'sha256',
@@ -54,6 +61,14 @@ export class AuthService {
   // REGISTRATION
   // ============================================================
 
+  /**
+   * Creates a new merchant account and the verification challenge required to
+   * activate the email address.
+   *
+   * Registration is intentionally split so the account record can be created
+   * even if outbound email delivery fails; the account remains user-visible,
+   * while the operator can retry the verification email separately.
+   */
   async register(registerAuthDto: RegisterAuthDto) {
     const { name, email, password, phone } = registerAuthDto;
 
@@ -115,6 +130,13 @@ export class AuthService {
   // LOGIN — FIRST FACTOR
   // ============================================================
 
+  /**
+   * Validates the merchant's password and then issues a fresh short-lived OTP
+   * challenge for the second login step.
+   *
+   * We intentionally use a generic unauthorized response to avoid leaking
+   * whether the email exists or whether the account is blocked.
+   */
   async login(loginAuthDto: LoginAuthDto) {
     const { email, password } = loginAuthDto;
 
@@ -200,6 +222,13 @@ export class AuthService {
   // LOGIN — SECOND FACTOR
   // ============================================================
 
+  /**
+   * Completes the second factor by validating the OTP against the most recent
+   * unconsumed login challenge.
+   *
+   * The check is intentionally strict: expired, consumed, and exhausted
+   * challenges fail closed before a JWT is issued.
+   */
   async verifyLogin(dto: VerifyLoginDto) {
     const { email, code } = dto;
 
@@ -292,6 +321,10 @@ export class AuthService {
   // now proves they own the mailbox with the emailed code. A correct code
   // therefore completes sign-up AND starts the session, so the merchant lands
   // on their home page without a second password + OTP round trip.
+  /**
+   * Confirms a merchant's email address by validating the verification OTP and
+   * updating the account state once the challenge is atomically consumed.
+   */
   async verifyEmail(dto: VerifyEmailDto) {
   const { email, code } = dto;
 
@@ -405,6 +438,12 @@ export class AuthService {
   // The response is intentionally identical whether or not the email exists,
   // is already verified, or is inside the cooldown, so this endpoint cannot
   // be used to discover which emails are registered.
+  /**
+   * Reissues a verification code only when the previous one has cooled down.
+   *
+   * This helps prevent OTP spam while still allowing legitimate retries after
+   * the request timeout window has passed.
+   */
   async resendVerification(dto: ResendVerificationDto) {
     const { email } = dto;
     const generic = {

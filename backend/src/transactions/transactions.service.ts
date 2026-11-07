@@ -41,6 +41,14 @@ export class TransactionsService {
     private readonly paymentProviderRegistry: PaymentProviderRegistry,
   ) { }
 
+  /**
+   * Creates a merchant payment and its hosted checkout session.
+   *
+   * The idempotency key is the business boundary for duplicate submission. If the
+   * same key is reused with the same payload, the service returns the original
+   * checkout result. If the payload differs, it fails fast instead of silently
+   * accepting a split-brain payment request.
+   */
   async create(
     merchantId: string,
     idempotencyKey: string | undefined,
@@ -145,7 +153,11 @@ export class TransactionsService {
   }
 
   /**
-   * Find a transaction by its merchant-scoped idempotency key.
+   * Finds the previously created payment using the merchant-scoped idempotency
+   * key.
+   *
+   * The query intentionally includes the latest active checkout session so the
+   * service can recover the original hosted link instead of creating a duplicate.
    */
   private findByIdempotencyKey(merchantId: string, key: string) {
     return this.databaseService.paymentTransaction.findUnique({
@@ -168,11 +180,13 @@ export class TransactionsService {
   }
 
   /**
-   * Reject reuse of an idempotency key with different payment details.
+   * Rejects a reused idempotency key when the payload differs from the original
+   * payment request.
+   *
+   * This is a safety check for accidental retries and duplicate submissions. It
+   * keeps the payment creation API deterministic and prevents a second request
+   * from mutating the meaning of the original transaction.
    */
-  /**
- * Reject reuse of an idempotency key with different payment details.
- */
   private assertSameRequest(
     existing: {
       amountTambala: number;
@@ -204,9 +218,13 @@ export class TransactionsService {
   }
 
   /**
- * Return the existing checkout link when its session is still valid.
- * If no valid session exists, do not silently create a new payment attempt.
- */
+   * Returns the original checkout response when the previous session is still
+   * valid.
+   *
+   * If the session has expired or been consumed, the method does not fabricate a
+   * new checkout URL; it exposes the current state instead so the caller can
+   * decide how to recover.
+   */
   private async getCheckoutResponse(transaction: {
     id: string;
     publicReference: string;
@@ -248,10 +266,21 @@ export class TransactionsService {
     };
   }
 
+  /**
+   * Sets a fixed checkout lifetime so a hosted payment link cannot remain active
+   * forever while the merchant or customer is still navigating the flow.
+   */
   private getSessionExpiry(): Date {
     return new Date(Date.now() + CHECKOUT_SESSION_MINUTES * 60 * 1000);
   }
 
+  /**
+   * Builds the public checkout URL for the hosted payment flow.
+   *
+   * The base URL is validated to ensure that checkout links are only generated for
+   * a trusted HTTPS origin, which helps avoid open redirects or unsafe payment
+   * flows.
+   */
   private buildCheckoutUrl(token: string): string {
     const baseUrl = this.configService
       .get<string>('CHECKOUT_BASE_URL')
@@ -287,8 +316,10 @@ export class TransactionsService {
   }
 
   /**
-   * Retrieve a transaction belonging to the authenticated merchant.
-   * The public reference is used instead of the internal database ID.
+   * Retrieves a transaction by the merchant-scoped public reference.
+   *
+   * The public reference is the stable identifier exposed to the frontend and is
+   * intentionally not the internal primary key used by Prisma.
    */
   async findOne(merchantId: string, reference: string) {
     const transaction =
@@ -308,11 +339,12 @@ export class TransactionsService {
 
 
   /**
-   * Validate a public checkout token and return safe checkout details.
+   * Validates a hosted checkout token and returns the payment metadata that the
+   * customer sees before provider selection.
    *
-   * Only the SHA-256 hash is used to find the session.
-   * The raw token is never stored or logged by this method.
-   * This method does not initiate a mobile-money payment.
+   * Only the hashed token is stored in the database; the raw value is never
+   * persisted or written to logs. Expired or invalid links are rejected before
+   * payment initiation begins.
    */
   async getCheckout(token: string) {
     const tokenHash = this.checkoutTokenService.hashToken(token);
@@ -371,12 +403,12 @@ export class TransactionsService {
   }
 
   /**
- * Start one provider attempt for an active hosted checkout session.
- *
- * The checkout session and payment transaction are claimed atomically
- * before making the external HTTP request. Ambiguous provider outcomes
- * are sent to reconciliation rather than automatically retried.
- */
+   * Begins one provider attempt for an active hosted checkout session.
+   *
+   * The checkout link and transaction are claimed atomically before any network
+   * request is made. This prevents two concurrent requests from starting the
+   * same payment and keeps provider callbacks deterministic.
+   */
   async initiateCheckoutPayment(
     token: string,
     dto: InitiateCheckoutPaymentDto,
@@ -518,11 +550,12 @@ export class TransactionsService {
 
 
   /**
-   * Persist the provider's initiation response only if the attempt and
+   * Persists the provider's initiation response only if the attempt and
    * transaction are still awaiting that response.
    *
-   * A provider callback may arrive before initiatePayment() returns.
-   * Conditional updates prevent this response from overwriting that callback.
+   * A provider callback can arrive before the HTTP call returns. The guarded
+   * update logic keeps the callback result authoritative when the two race each
+   * other.
    */
   private async applyInitiationResult(
     transactionId: string,

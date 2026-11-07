@@ -24,7 +24,13 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
     private readonly client: S3Client;
     private readonly bucket: string;
 
-
+    /**
+     * Builds the object-storage client used for Cloudflare R2 or a local S3-compatible
+     * endpoint.
+     *
+     * The bucket and credentials are validated at construction time so the service
+     * fails early when the environment is misconfigured.
+     */
     constructor(config: ConfigService) {
         const endpoint = config.get<string>('R2_ENDPOINT');
 
@@ -61,6 +67,12 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
     }
 
 
+    /**
+     * Wraps storage operations with consistent logging and error reporting.
+     *
+     * This helps operators distinguish configuration issues from transient network
+     * failures without changing the service's external contract.
+     */
     private async logged<T>(
         operation: string,
         action: () => Promise<T>,
@@ -93,6 +105,9 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
+    /**
+     * Generates a short-lived upload URL for a document or proof file.
+     */
     async createUploadUrl(
         key: string,
         contentType: string,
@@ -111,6 +126,9 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
     }
 
 
+    /**
+     * Generates a signed download URL for a stored object.
+     */
     async createDownloadUrl(
         objectKey: string,
         expiresInSeconds = 300,
@@ -126,6 +144,10 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
     }
 
 
+    /**
+     * Creates a preview URL with inline disposition so browsers can render the
+     * file without forcing an immediate download.
+     */
     async createPreviewUrl(key: string): Promise<string> {
         return this.logged('createPreviewUrl', async () => {
             const command = new GetObjectCommand({
@@ -140,6 +162,10 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
         });
     }
 
+    /**
+     * Reads the metadata for an object in storage without downloading the full
+     * body.
+     */
     async getObjectMetadata(key: string) {
         return this.logged('getObjectMetadata', () =>
             this.client.send(
@@ -151,6 +177,10 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
         );
     }
 
+    /**
+     * Reads the beginning of a file to validate its MIME signature before it is
+     * accepted as a document upload.
+     */
     async readFileSignature(key: string): Promise<Uint8Array> {
         return this.logged('readFileSignature', async () => {
             const response = await this.client.send(
@@ -169,6 +199,10 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
         });
     }
 
+    /**
+     * Deletes a file from the bucket when an upload is invalid or a document is
+     * no longer needed.
+     */
     async deleteObject(key: string): Promise<void> {
         return this.logged('deleteObject', async () => {
             await this.client.send(
@@ -180,6 +214,10 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
         });
     }
 
+    /**
+     * Verifies that the configured bucket is reachable as soon as the module is
+     * created.
+     */
     async onModuleInit(): Promise<void> {
         this.logger.log('Checking object storage connection...');
 
@@ -211,6 +249,9 @@ export class R2StorageService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
+    /**
+     * Closes the underlying S3 client so the application can exit cleanly.
+     */
     onModuleDestroy(): void {
         this.client.destroy();
         this.logger.log('R2 storage client closed');

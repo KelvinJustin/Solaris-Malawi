@@ -1,4 +1,4 @@
-import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Test, type TestingModule } from '@nestjs/testing';
@@ -29,14 +29,21 @@ describe('ProviderCallbacksService', () => {
     },
   };
 
+  const makeSignedCallback = (body: Record<string, unknown>, timestamp = String(Date.now())) => {
+    const rawBody = Buffer.from(JSON.stringify(body));
+    const signature = createHmac('sha256', 'local-development-secret')
+      .update(`${timestamp}.${rawBody.toString('utf8')}`)
+      .digest('hex');
+
+    return { rawBody, timestamp, signature };
+  };
+
   beforeEach(async () => {
     vi.clearAllMocks();
     process.env.SIGNING_SECRET = 'local-development-secret';
     process.env.NODE_ENV = 'test';
 
-    databaseService.$transaction.mockImplementation(async (callback) => {
-      return callback(transactionClient);
-    });
+    databaseService.$transaction.mockImplementation(async (callback) => callback(transactionClient));
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -51,11 +58,7 @@ describe('ProviderCallbacksService', () => {
     service = module.get<ProviderCallbacksService>(ProviderCallbacksService);
   });
 
-  it('should be defined', () => {
-    expect(service).toBeDefined();
-  });
-
-  it('accepts a valid provider callback and finalizes the payment attempt', async () => {
+  it('accepts a valid successful callback and finalizes the payment attempt', async () => {
     const body = {
       event: 'payment.updated',
       providerReference: 'provider-ref-1',
@@ -68,11 +71,7 @@ describe('ProviderCallbacksService', () => {
       occurredAt: '2025-01-01T00:00:00.000Z',
     };
 
-    const rawBody = Buffer.from(JSON.stringify(body));
-    const timestamp = String(Date.now());
-    const signature = createHmac('sha256', 'local-development-secret')
-      .update(`${timestamp}.${rawBody.toString('utf8')}`)
-      .digest('hex');
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
 
     transactionClient.paymentAttempt.findUnique.mockResolvedValue({
       id: 'attempt-123',
@@ -116,9 +115,54 @@ describe('ProviderCallbacksService', () => {
         where: expect.objectContaining({ id: 'txn-123' }),
         data: expect.objectContaining({
           status: PaymentStatus.SUCCEEDED,
+          providerReference: 'provider-ref-1',
         }),
       }),
     );
+  });
+
+  it('returns duplicate=true for a repeated callback with the same final state', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: ProviderCallbackStatus.SUCCESSFUL,
+      occurredAt: '2025-01-01T00:00:00.000Z',
+    };
+
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+
+    transactionClient.paymentAttempt.findUnique.mockResolvedValue({
+      id: 'attempt-123',
+      status: PaymentAttemptStatus.SUCCEEDED,
+      provider: PaymentProvider.TEST,
+      providerReference: 'provider-ref-1',
+      transaction: {
+        id: 'txn-123',
+        publicReference: 'txn-123',
+        provider: PaymentProvider.TEST,
+        providerReference: 'provider-ref-1',
+        amountTambala: 2500,
+        currency: 'MWK',
+        status: PaymentStatus.SUCCEEDED,
+      },
+    });
+
+    await expect(
+      service.handleCallback({
+        body: body as any,
+        rawBody,
+        timestamp,
+        signature,
+      }),
+    ).resolves.toEqual({ received: true, duplicate: true });
+
+    expect(transactionClient.paymentAttempt.updateMany).not.toHaveBeenCalled();
+    expect(transactionClient.paymentTransaction.updateMany).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported callback events before touching the database', async () => {
@@ -134,11 +178,7 @@ describe('ProviderCallbacksService', () => {
       occurredAt: '2025-01-01T00:00:00.000Z',
     };
 
-    const rawBody = Buffer.from(JSON.stringify(body));
-    const timestamp = String(Date.now());
-    const signature = createHmac('sha256', 'local-development-secret')
-      .update(`${timestamp}.${rawBody.toString('utf8')}`)
-      .digest('hex');
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
 
     await expect(
       service.handleCallback({
@@ -152,7 +192,7 @@ describe('ProviderCallbacksService', () => {
     expect(transactionClient.paymentAttempt.findUnique).not.toHaveBeenCalled();
   });
 
-  it('rejects callbacks with an invalid signature', async () => {
+  it('rejects stale or malformed callback timestamps', async () => {
     const body = {
       event: 'payment.updated',
       providerReference: 'provider-ref-1',
@@ -165,13 +205,83 @@ describe('ProviderCallbacksService', () => {
       occurredAt: '2025-01-01T00:00:00.000Z',
     };
 
+    const { rawBody } = makeSignedCallback(body, String(Date.now() - 10 * 60 * 1000));
+
     await expect(
       service.handleCallback({
         body: body as any,
-        rawBody: Buffer.from(JSON.stringify(body)),
-        timestamp: String(Date.now()),
+        rawBody,
+        timestamp: String(Date.now() - 10 * 60 * 1000),
         signature: 'deadbeef',
       }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('rejects invalid callback amounts that cannot be represented as tambala', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25.123,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: ProviderCallbackStatus.SUCCESSFUL,
+      occurredAt: '2025-01-01T00:00:00.000Z',
+    };
+
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+
+    await expect(
+      service.handleCallback({
+        body: body as any,
+        rawBody,
+        timestamp,
+        signature,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(transactionClient.paymentAttempt.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('rejects callbacks whose transaction or provider metadata do not match the stored records', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: ProviderCallbackStatus.SUCCESSFUL,
+      occurredAt: '2025-01-01T00:00:00.000Z',
+    };
+
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+
+    transactionClient.paymentAttempt.findUnique.mockResolvedValue({
+      id: 'attempt-123',
+      status: PaymentAttemptStatus.PROCESSING,
+      provider: PaymentProvider.AIRTEL_MONEY,
+      providerReference: null,
+      transaction: {
+        id: 'txn-123',
+        publicReference: 'txn-123',
+        provider: PaymentProvider.TEST,
+        providerReference: null,
+        amountTambala: 2500,
+        currency: 'MWK',
+        status: PaymentStatus.PROCESSING,
+      },
+    });
+
+    await expect(
+      service.handleCallback({
+        body: body as any,
+        rawBody,
+        timestamp,
+        signature,
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 });

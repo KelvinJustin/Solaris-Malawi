@@ -1,13 +1,18 @@
 import {
   BadRequestException,
-  NotFoundException,
   ConflictException,
+  ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Test, type TestingModule } from '@nestjs/testing';
 
-import { AccountStatus, CheckoutSessionStatus, PaymentStatus } from '../generated/prisma/enums.js';
+import {
+  AccountStatus,
+  CheckoutSessionStatus,
+  PaymentStatus,
+} from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
 import { PaymentProviderRegistry } from '../payment-providers/registry/payment-provider.registry.js';
 import { CheckoutTokenService } from './checkout-token.service.js';
@@ -53,9 +58,7 @@ describe('TransactionsService', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
 
-    databaseService.$transaction.mockImplementation(async (callback) => {
-      return callback(transactionClient);
-    });
+    databaseService.$transaction.mockImplementation(async (callback) => callback(transactionClient));
 
     configService.get.mockImplementation((key: string) => {
       if (key === 'CHECKOUT_BASE_URL') {
@@ -98,18 +101,26 @@ describe('TransactionsService', () => {
     service = module.get<TransactionsService>(TransactionsService);
   });
 
-  it('should be defined', () => {
-    expect(service).toBeDefined();
-  });
-
   it('requires an idempotency key before creating a payment', async () => {
     await expect(
-      service.create('merchant-123', '', {
+      service.create('merchant-123', '   ', {
         amountTambala: 2500,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(databaseService.merchantProfile.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('rejects payment creation for merchants whose profile is not approved', async () => {
+    databaseService.merchantProfile.findUnique.mockResolvedValue({
+      accountStatus: AccountStatus.PENDING_SUBMISSION,
+    });
+
+    await expect(
+      service.create('merchant-123', 'idem-key', {
+        amountTambala: 2500,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('creates a payment and checkout session for an approved merchant', async () => {
@@ -170,6 +181,44 @@ describe('TransactionsService', () => {
     expect(result.expires_at).toBeInstanceOf(Date);
   });
 
+  it('reuses the same checkout response when the idempotency key is reused with identical payload data', async () => {
+    databaseService.merchantProfile.findUnique.mockResolvedValue({
+      accountStatus: AccountStatus.APPROVED,
+    });
+    databaseService.paymentTransaction.findUnique.mockResolvedValue({
+      amountTambala: 2500,
+      currency: 'MWK',
+      customerPhone: '+265991234567',
+      description: 'Coffee order',
+      merchantReference: 'order-42',
+      checkoutSessions: [
+        {
+          tokenEncrypted: 'encrypted-token',
+          expiresAt: new Date(Date.now() + 60_000),
+        },
+      ],
+    });
+
+    checkoutTokenService.decryptToken.mockReturnValue('checkout-token');
+
+    await expect(
+      service.create('merchant-123', 'idem-key', {
+        amountTambala: 2500,
+        customerPhone: '+265991234567',
+        description: 'Coffee order',
+        merchantReference: 'order-42',
+      }),
+    ).resolves.toMatchObject({
+      publicReference: undefined,
+      status: undefined,
+      amountTambala: 2500,
+      currency: 'MWK',
+      checkout_url: 'https://checkout.example.com/checkout/checkout-token',
+    });
+
+    expect(transactionClient.paymentTransaction.create).not.toHaveBeenCalled();
+  });
+
   it('rejects a reused idempotency key with different payment details', async () => {
     databaseService.merchantProfile.findUnique.mockResolvedValue({
       accountStatus: AccountStatus.APPROVED,
@@ -193,7 +242,7 @@ describe('TransactionsService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('returns the checkout payload for a valid session', async () => {
+  it('returns checkout metadata for a valid active session and exposes canPay when the payment is still created', async () => {
     checkoutTokenService.hashToken.mockReturnValue('token-hash');
     databaseService.checkoutSession.findUnique.mockResolvedValue({
       id: 'session-1',
@@ -218,11 +267,37 @@ describe('TransactionsService', () => {
     });
   });
 
-  it('throws when a merchant asks for a missing transaction', async () => {
+  it('marks expired checkout links as expired and rejects them', async () => {
+    checkoutTokenService.hashToken.mockReturnValue('token-hash');
+    databaseService.checkoutSession.findUnique.mockResolvedValue({
+      id: 'session-1',
+      status: CheckoutSessionStatus.ACTIVE,
+      expiresAt: new Date(Date.now() - 1000),
+      transaction: {
+        publicReference: 'sp_abc123',
+        amountTambala: 2500,
+        currency: 'MWK',
+        description: 'Coffee order',
+        status: PaymentStatus.CREATED,
+      },
+    });
+    databaseService.checkoutSession.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(service.getCheckout('checkout-token')).rejects.toBeInstanceOf(NotFoundException);
+    expect(databaseService.checkoutSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: 'session-1',
+          status: CheckoutSessionStatus.ACTIVE,
+        },
+        data: { status: CheckoutSessionStatus.EXPIRED },
+      }),
+    );
+  });
+
+  it('throws when a merchant asks for a missing transaction by public reference', async () => {
     databaseService.paymentTransaction.findFirst.mockResolvedValue(null);
 
-    await expect(service.findOne('merchant-123', 'sp_missing')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.findOne('merchant-123', 'sp_missing')).rejects.toBeInstanceOf(NotFoundException);
   });
 });

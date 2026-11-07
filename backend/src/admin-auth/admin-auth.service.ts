@@ -17,10 +17,10 @@ export class AdminAuthService {
     ) { }
 
     /**
-     * Authenticate an administrator using email and password.
+     * Authenticates an internal admin using the email/password form.
      *
-     * Admin accounts are provisioned by process;
-     * there is intentionally no public registration method.
+     * The admin domain is intentionally separate from merchant sign-in. These
+     * users are provisioned by trusted operators and are never allowed to self-register.
      */
     async login(email: string, password: string) {
         const admin = await this.databaseService.admin.findUnique({
@@ -63,8 +63,10 @@ export class AdminAuthService {
     }
 
     /**
-     * Revoke the current admin JWT so it cannot be reused.
-     * The controller should also clear the admin cookie.
+     * Revokes the current admin JWT so it cannot be reused by a stale client.
+     *
+     * The controller clears the cookie at the same time, but the denylist entry is
+     * the source of truth for whether the token is still valid.
      */
     async logout(admin: { adminId: string; jti: string; exp: number }) {
         await this.databaseService.adminRevokedToken.create({

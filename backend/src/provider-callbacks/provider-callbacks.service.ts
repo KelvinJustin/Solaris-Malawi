@@ -30,6 +30,13 @@ export class ProviderCallbacksService {
 
     constructor(private readonly database: DatabaseService) { }
 
+    /**
+     * Handles the signed provider webhook for a payment update.
+     *
+     * This is the canonical place where callback payloads are validated against
+     * stored records. We reject replayed callbacks, stale signatures, and any
+     * payload that contradicts the payment history.
+     */
     async handleCallback(input: CallbackInput) {
         this.verifySignature(input);
 
@@ -238,6 +245,14 @@ export class ProviderCallbacksService {
         });
     }
 
+    /**
+     * Verifies that the callback was signed with the provider secret and that the
+     * timestamp is still fresh enough to trust.
+     *
+     * The signature is calculated from the raw request body; we intentionally do
+     * not validate against a parsed JSON object because the HMAC is based on the
+     * exact bytes sent by the provider.
+     */
     private verifySignature(input: CallbackInput): void {
         const { timestamp, signature, rawBody } = input;
 
