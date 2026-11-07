@@ -28,12 +28,18 @@ export class MerchantsController {
   // PROFILE
   // ============================================================
 
+  /**
+   * Returns the authenticated merchant's profile and related KYC documents.
+   */
   // GET /merchants/profile
   @Get('profile')
   getMyProfile(@CurrentUser('userId') merchantId: string) {
     return this.merchantsService.getMyProfile(merchantId);
   }
 
+  /**
+   * Updates editable profile fields while the application is in a mutable state.
+   */
   // PATCH /merchants/profile
   @Patch('profile')
   updateProfile(
@@ -47,6 +53,9 @@ export class MerchantsController {
   // SUBMISSION
   // ============================================================
 
+  /**
+   * Submits the merchant profile to the admin review workflow.
+   */
   // POST /merchants/profile/submit
   @Post('profile/submit')
   submitForReview(@CurrentUser('userId') merchantId: string) {
@@ -57,6 +66,9 @@ export class MerchantsController {
   // DOCUMENTS
   // ============================================================
 
+  /**
+   * Requests a signed upload URL for a document needed by the merchant profile.
+   */
   // POST /merchants/documents/upload-url
   @Post('documents/upload-url')
   requestDocumentUpload(
@@ -66,6 +78,9 @@ export class MerchantsController {
     return this.merchantDocumentsService.requestUpload(merchantId, dto);
   }
 
+  /**
+   * Finalizes an upload after the file metadata and content signature are checked.
+   */
   // POST /merchants/documents/:uploadId/complete
   @Post('documents/:uploadId/complete')
   completeDocumentUpload(
@@ -75,6 +90,9 @@ export class MerchantsController {
     return this.merchantDocumentsService.completeUpload(merchantId, uploadId);
   }
 
+  /**
+   * Lists the merchant's uploaded documents and their current assessment state.
+   */
   // GET /merchants/documents
   @Get('documents')
   listDocuments(

@@ -36,6 +36,12 @@ export class AdminAuthController {
         private readonly configService: ConfigService,
     ) { }
 
+    /**
+     * Centralizes the cookie settings used by the admin auth flow.
+     *
+     * The cookie is HTTP-only and same-site to reduce the risk of token theft or
+     * cross-site session abuse while keeping the normal admin dashboard usable.
+     */
     private cookieOptions(): CookieOptions {
         return {
             httpOnly: true,
@@ -45,6 +51,9 @@ export class AdminAuthController {
         };
     }
 
+    /**
+     * Logs an internal admin in and sets the short-lived admin session cookie.
+     */
     @Post('login')
     @HttpCode(HttpStatus.OK)
     async login(
@@ -65,6 +74,10 @@ export class AdminAuthController {
         };
     }
 
+    /**
+     * Logs an admin out and invalidates the current JWT before clearing the
+     * browser cookie.
+     */
     @Post('logout')
     @HttpCode(HttpStatus.OK)
     @UseGuards(AdminJwtAuthGuard)
@@ -89,6 +102,10 @@ export class AdminAuthController {
         return result;
     }
 
+    /**
+     * Returns the currently authenticated admin identity without exposing the
+     * JWT payload details.
+     */
     @Get('me')
     @UseGuards(AdminJwtAuthGuard)
     me(@Req() request: AdminRequest) {

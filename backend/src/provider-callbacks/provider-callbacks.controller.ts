@@ -22,10 +22,11 @@ export class ProviderCallbacksController {
     ) { }
 
     /**
-     * Receives signed payment-status notifications from payment providers.
+     * Receives signed payment-status notifications from the provider.
      *
      * The raw request body is required because the HMAC signature must be
-     * verified against the exact bytes sent by the provider.
+     * validated against the exact bytes sent by the provider, not the parsed JSON
+     * object created by NestJS after deserialization.
      */
 
     @Post()

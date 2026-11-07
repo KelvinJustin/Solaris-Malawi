@@ -22,7 +22,12 @@ export class AdminService {
     private readonly r2StorageService: R2StorageService,
   ) { }
 
-
+  /**
+   * Lists merchant applications waiting for administrator review.
+   *
+   * The admin dashboard uses this endpoint to see which profiles are active in
+   * the underwriting pipeline and how much work remains to be processed.
+   */
   async findMerchantApplications(page = 1, limit = 20) {
     // Reject invalid pagination values instead of silently accepting them.
     if (
@@ -95,6 +100,12 @@ export class AdminService {
   }
 
 
+  /**
+   * Fetches the full review record for one merchant application.
+   *
+   * This view includes the merchant profile, all uploaded KYC documents, and the
+   * status audit trail so the reviewer can evaluate the application in context.
+   */
   async findMerchantApplicationById(profileId: string) {
     // Search for one profile using its unique ID.
     const application =
@@ -145,6 +156,13 @@ export class AdminService {
     return application;
   }
 
+  /**
+   * Moves a submitted application into the active review state.
+   *
+   * This is the formal handoff from merchant submission to administrative
+   * review. The status change and review-history entry are committed together so
+   * the audit trail is accurate even under concurrent access.
+   */
   async startMerchantApplicationReview(
     profileId: string,
     adminId: string,
@@ -217,6 +235,12 @@ export class AdminService {
   /**
    * Approves a merchant application only when its documents
    * satisfy the configured document requirements.
+   */
+  /**
+   * Approves a merchant profile only after every required document is valid.
+   *
+   * We fail closed here: a missing, pending, rejected, or expired document
+   * blocks approval even if the rest of the application appears complete.
    */
   async approveMerchantApplication(
     profileId: string,
@@ -396,6 +420,13 @@ export class AdminService {
    * are saved in one transaction. If any operation fails, none
    * of those changes should be committed.
    */
+  /**
+   * Rejects an in-review application and captures a clear reason for the
+   * merchant to correct.
+   *
+   * The rejection reason is intentionally required so the merchant receives a
+   * concrete way to fix the application rather than a generic failure.
+   */
   async rejectMerchantApplication(
     profileId: string,
     adminId: string,
@@ -474,6 +505,10 @@ export class AdminService {
   }
 
 
+  /**
+   * Creates a signed preview URL for a document that belongs to an application
+   * under review.
+   */
   async createDocumentPreviewUrl(
     profileId: string,
     documentId: string,

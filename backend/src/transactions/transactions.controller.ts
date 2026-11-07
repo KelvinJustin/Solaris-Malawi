@@ -21,13 +21,11 @@ export class TransactionsController {
   ) { }
 
   /**
-   * Create a payment transaction for the authenticated merchant.
+   * Creates a payment transaction for the currently authenticated merchant.
    *
-   * The merchant's identity comes from the authenticated session,
-   * never from the request body.
-   *
-   * Idempotency-Key prevents accidental duplicate transactions
-   * when a client retries the same request.
+   * The session identity is authoritative; the request body carries only the
+   * payment details. The idempotency key prevents accidental duplicate
+   * submissions when a client retries the exact same request.
    */
   @Post()
   create(
@@ -43,8 +41,9 @@ export class TransactionsController {
   }
 
   /**
- * Retrieve a transaction using its public reference.
- */
+   * Retrieves a transaction by its public reference for the authenticated
+   * merchant.
+   */
   @Get(':reference')
   findOne(
     @CurrentUser('userId') merchantId: string,

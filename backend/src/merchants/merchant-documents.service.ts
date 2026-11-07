@@ -25,6 +25,10 @@ export class MerchantDocumentsService {
         private readonly storage: R2StorageService,
     ) { }
 
+    /**
+     * Creates a signed upload intent so a merchant can place a document into the
+     * document bucket without exposing the storage credentials to the browser.
+     */
     async requestUpload(
         merchantId: string,
         dto: RequestDocumentUploadDto,
@@ -82,6 +86,12 @@ export class MerchantDocumentsService {
         };
     }
 
+    /**
+     * Finalizes a pending upload after the document is validated and persisted.
+     *
+     * The service verifies size, mime type, and file signature before the new
+     * document replaces the older version for that document type.
+     */
     async completeUpload(merchantId: string, uploadId: string) {
         const profile = await this.database.merchantProfile.findUnique({
             where: { merchantId },
@@ -192,6 +202,12 @@ export class MerchantDocumentsService {
         return result;
     }
 
+    /**
+     * Validates the file magic bytes for the supported document types.
+     *
+     * This prevents a browser from uploading a PDF with a JPEG extension or vice
+     * versa, which would otherwise cause confusing downstream review issues.
+     */
     private hasValidSignature(
         mimeType: string,
         bytes: Uint8Array,
@@ -216,6 +232,9 @@ export class MerchantDocumentsService {
         }
     }
 
+    /**
+     * Lists the uploaded documents for a merchant profile in review order.
+     */
     async listDocuments(merchantId: string) {
         const profile = await this.database.merchantProfile.findUnique({
             where: { merchantId },

@@ -6,6 +6,13 @@ import { createHash, randomBytes, createCipheriv, createDecipheriv } from 'node:
 export class CheckoutTokenService {
     private readonly encryptionKey: Buffer;
 
+    /**
+     * Creates the token service used to protect hosted checkout links.
+     *
+     * We keep the raw token out of the database and only store a hash plus an
+     * encrypted payload. This prevents casual inspection of checkout links while
+     * still allowing the backend to verify and decrypt them when needed.
+     */
     constructor(private readonly configService: ConfigService) {
         const encodedKey = this.configService.get<string>('CHECKOUT_TOKEN_ENCRYPTION_KEY');
 
@@ -26,6 +33,9 @@ export class CheckoutTokenService {
         }
     }
 
+    /**
+     * Generates a fresh checkout token and its server-side hash/encrypted form.
+     */
     createToken(): {
         token: string;
         tokenHash: string;
@@ -40,6 +50,9 @@ export class CheckoutTokenService {
         };
     }
 
+    /**
+     * Hashes a checkout token for database lookup without storing the raw value.
+     */
     hashToken(token: string): string {
         return createHash('sha256').update(token, 'utf8').digest('hex');
     }
@@ -63,6 +76,13 @@ export class CheckoutTokenService {
         ].join('.');
     }
 
+    /**
+     * Decrypts a checkout token that was stored encrypted in the session record.
+     *
+     * We validate the token format and authentication tag before returning the
+     * plaintext so invalid or tampered values fail before they reach the payment
+     * workflow.
+     */
     decryptToken(encryptedToken: string): string {
         try {
             const parts = encryptedToken.split('.');
