@@ -14,6 +14,10 @@ export class AdminJwtStrategy extends PassportStrategy(
     Strategy,
     'admin-jwt',
 ) {
+    /**
+     * Validates admin JWTs from the cookie or bearer header and checks the
+     * database state before the request proceeds.
+     */
     constructor(
         configService: ConfigService,
         private readonly databaseService: DatabaseService,

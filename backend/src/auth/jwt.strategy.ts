@@ -9,7 +9,10 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  // Dependency injection: configService is used to retrieve the JWT signing secret.
+  /**
+   * Validates merchant JWTs from either the access_token cookie or the bearer
+   * token header.
+   */
   constructor(
     configService: ConfigService,
     private readonly databaseService: DatabaseService,

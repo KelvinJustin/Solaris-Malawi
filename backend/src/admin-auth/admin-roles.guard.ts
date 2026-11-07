@@ -24,6 +24,10 @@ interface AdminRequest {
 export class AdminRolesGuard implements CanActivate {
     constructor(private readonly reflector: Reflector) { }
 
+    /**
+     * Enforces the route-level role requirements declared via the admin role
+     * decorator.
+     */
     canActivate(context: ExecutionContext): boolean {
         // Read the roles allowed by the route's @AdminRoles() decorator.
         const requiredRoles = this.reflector.getAllAndOverride<AdminRole[]>(

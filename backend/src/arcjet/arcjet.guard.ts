@@ -12,6 +12,12 @@ import { getRawArcjetClient } from './arcjet.module.js';
 export class ArcjetGuard implements CanActivate {
   private readonly logger = new Logger(ArcjetGuard.name);
 
+  /**
+   * Runs request-level abuse checks before a route is allowed to continue.
+   *
+   * This is intentionally a staged gate: rate-limit and bot detection failures
+   * are rejected at the edge before any business logic runs.
+   */
   async canActivate(context: ExecutionContext): Promise<boolean> {
     // Extract the HTTP request object from the NestJS execution context
     const request = context.switchToHttp().getRequest();
