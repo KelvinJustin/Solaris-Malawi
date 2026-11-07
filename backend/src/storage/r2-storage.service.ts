@@ -1,41 +1,65 @@
-
 import {
     DeleteObjectCommand,
     GetObjectCommand,
+    HeadBucketCommand,
     HeadObjectCommand,
     PutObjectCommand,
     S3Client,
 } from '@aws-sdk/client-s3';
+
 import {
     Injectable,
     Logger,
     OnModuleDestroy,
+    OnModuleInit,
 } from '@nestjs/common';
+
 import { ConfigService } from '@nestjs/config';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 @Injectable()
-export class R2StorageService implements OnModuleDestroy {
+export class R2StorageService implements OnModuleInit, OnModuleDestroy {
+
     private readonly logger = new Logger(R2StorageService.name);
     private readonly client: S3Client;
     private readonly bucket: string;
 
+
     constructor(config: ConfigService) {
-        const accountId = config.getOrThrow<string>('R2_ACCOUNT_ID');
+        const endpoint = config.get<string>('R2_ENDPOINT');
+
+        const isLocalStorage = Boolean(endpoint);
+
         this.bucket = config.getOrThrow<string>('R2_BUCKET_NAME');
 
+        const region = config.get<string>('R2_REGION') ?? 'auto';
+
         this.client = new S3Client({
-            region: 'auto',
-            endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-            forcePathStyle: true,
+            region,
+            requestChecksumCalculation: 'WHEN_REQUIRED',
+
+            ...(isLocalStorage
+                ? {
+                    endpoint,
+                    forcePathStyle:
+                        config.get<boolean>('R2_FORCE_PATH_STYLE') ?? true,
+                }
+                : {
+                    endpoint: `https://${config.getOrThrow<string>('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com`,
+                    forcePathStyle: true,
+                }),
+
             credentials: {
                 accessKeyId: config.getOrThrow<string>('R2_ACCESS_KEY_ID'),
                 secretAccessKey: config.getOrThrow<string>('R2_SECRET_ACCESS_KEY'),
             },
         });
 
-        this.logger.log('R2 storage service initialized');
+        this.logger.log(
+            `Object storage initialized (${isLocalStorage ? 'LOCAL S3' : 'CLOUDFLARE R2'})`,
+        );
     }
+
 
     private async logged<T>(
         operation: string,
@@ -154,6 +178,37 @@ export class R2StorageService implements OnModuleDestroy {
                 }),
             );
         });
+    }
+
+    async onModuleInit(): Promise<void> {
+        this.logger.log('Checking object storage connection...');
+
+        try {
+            await this.client.send(
+                new HeadBucketCommand({
+                    Bucket: this.bucket,
+                }),
+            );
+
+            this.logger.log('Object storage connection established successfully.');
+            this.logger.log(`Storage bucket verified: ${this.bucket}`);
+        } catch (error: unknown) {
+            const details =
+                typeof error === 'object' && error !== null
+                    ? (error as {
+                        name?: string;
+                        Code?: string;
+                        $metadata?: { httpStatusCode?: number };
+                    })
+                    : {};
+
+            this.logger.error(
+                `Object storage connection failed: ${details.Code ?? details.name ?? 'Unknown error'
+                } (HTTP ${details.$metadata?.httpStatusCode ?? 'unknown'})`,
+            );
+
+            throw error;
+        }
     }
 
     onModuleDestroy(): void {

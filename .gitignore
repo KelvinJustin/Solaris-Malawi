@@ -61,3 +61,14 @@ pids
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 
+
+# Monorepo subfolders
+backend/dist/
+backend/node_modules/
+frontend/dist/
+frontend/node_modules/
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
+
