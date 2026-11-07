@@ -251,4 +251,4 @@ Comprehensive technical and domain documentation is available in `backend/docs/`
 
 ## License
 
-This project is currently marked `UNLICENSED` in `package.json`.
+This project is currently `UNLICENSED`.
