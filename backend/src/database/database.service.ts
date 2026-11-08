@@ -5,6 +5,9 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { prismaQueryInsights } from '@prisma/sqlcommenter-query-insights';
+import { queryTags } from '@prisma/sqlcommenter-query-tags';
+import { traceContext } from '@prisma/sqlcommenter-trace-context';
 import { PrismaClient } from '../generated/prisma/client.js';
 
 @Injectable()
@@ -27,7 +30,12 @@ export class DatabaseService
     // Configure Prisma to connect to PostgreSQL using node-postgres.
     const adapter = new PrismaPg({ connectionString });
 
-    super({ adapter });
+    // Attach Prisma Query Insights comment metadata and request-scoped tags
+    // so Query Insights and SQL comments include route/request metadata.
+    super({
+      adapter,
+      comments: [prismaQueryInsights(), traceContext(), queryTags()],
+    });
   }
 
   /**

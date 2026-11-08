@@ -13,6 +13,7 @@ import { TransactionsModule } from './transactions/transactions.module.js';
 import { PaymentProvidersModule } from './payment-providers/payment-providers.module.js';
 import { ProviderCallbacksModule } from './provider-callbacks/provider-callbacks.module.js';
 import { StorageModule } from './storage/storage.module.js';
+import { AnalyticsModule } from './analytics/analytics.module.js';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { StorageModule } from './storage/storage.module.js';
     PaymentProvidersModule,
     ProviderCallbacksModule,
     StorageModule,
+    AnalyticsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

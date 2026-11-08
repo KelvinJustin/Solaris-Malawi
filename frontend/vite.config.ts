@@ -13,5 +13,9 @@ export default defineConfig({
   ],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   // Must match FRONTEND_URL in the backend .env (the CORS origin).
-  server: { port: 5173, strictPort: true },
+  server: {
+    port: 5173,
+    strictPort: true,
+    allowedHosts: ["solaris-malawi.onrender.com"],
+  },
 });

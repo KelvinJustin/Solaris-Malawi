@@ -1,9 +1,12 @@
 import { NestFactory } from '@nestjs/core';
-import { json } from 'express';
+import { json, type NextFunction, type Request, type Response } from 'express';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
+import crypto from 'node:crypto';
+import { withQueryTags } from '@prisma/sqlcommenter-query-tags';
 import { AppModule } from './app.module.js';
 import dotenv from 'dotenv';
+
 dotenv.config();
 
 async function bootstrap() {
@@ -19,7 +22,26 @@ async function bootstrap() {
       },
     }),
   );
+
   app.use(cookieParser());
+
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const requestId =
+      (req.headers['x-request-id'] as string | undefined) ??
+      crypto.randomUUID();
+    const route = req.originalUrl?.split('?')[0] ?? req.url ?? 'unknown-route';
+
+    return withQueryTags(
+      {
+        requestId,
+        route,
+        method: req.method,
+      },
+      async () => {
+        next();
+      },
+    );
+  });
 
   app.useGlobalPipes(
     new ValidationPipe({
