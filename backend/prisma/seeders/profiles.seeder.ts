@@ -6,11 +6,17 @@ import {
   DocumentType,
   ProfileActorType,
 } from "../../src/generated/prisma/enums.js";
+import {
+  createFileLogger,
+  flushFileLogger,
+} from "../../src/logging/file-logger.js";
 
 import {
   prisma,
   disconnectSeedClient,
 } from "./seed-client.js";
+
+const logger = createFileLogger("profile-seeder");
 
 const fixtures = [
   {
@@ -56,9 +62,9 @@ const fixtures = [
 ];
 
 async function main(): Promise<void> {
-  console.log("[PROFILE SEED] Seeder loaded.");
-  console.log(`[PROFILE SEED] ${fixtures.length} profile fixtures found.`);
-  console.log("[PROFILE SEED] Starting...");
+  logger.info("[PROFILE SEED] Seeder loaded.");
+  logger.info({ fixtureCount: fixtures.length }, "[PROFILE SEED] Fixtures loaded");
+  logger.info("[PROFILE SEED] Starting...");
 
   for (const fixture of fixtures) {
     const merchant = await prisma.merchant.findUnique({
@@ -96,8 +102,9 @@ async function main(): Promise<void> {
       },
     });
 
-    console.log(
-      `[PROFILE SEED] Profile ready: ${fixture.businessName} (${fixture.status})`,
+    logger.info(
+      { profileId: profile.id, status: fixture.status },
+      "[PROFILE SEED] Profile ready",
     );
 
     for (const type of fixture.documents) {
@@ -138,7 +145,7 @@ async function main(): Promise<void> {
         });
       }
 
-      console.log(`[PROFILE SEED] Document ready: ${type}`);
+      logger.info({ documentType: type }, "[PROFILE SEED] Document ready");
     }
 
     // Rebuild review history for these development fixtures.
@@ -170,23 +177,25 @@ async function main(): Promise<void> {
       },
     });
 
-    console.log(
-      `[PROFILE SEED] Review history ready: ${fixture.businessName}`,
+    logger.info(
+      { profileId: profile.id },
+      "[PROFILE SEED] Review history ready",
     );
   }
 
-  console.log("[PROFILE SEED] SUCCESS — all profile fixtures seeded.");
+  logger.info("[PROFILE SEED] SUCCESS — all profile fixtures seeded.");
 }
 
-console.log("[PROFILE SEED] Loading seeder...");
+logger.info("[PROFILE SEED] Loading seeder...");
 
 try {
   await main();
 } catch (error) {
-  console.error("[PROFILE SEED] FAILED:", error);
+  logger.error({ err: error }, "[PROFILE SEED] FAILED");
   process.exitCode = 1;
 } finally {
-  console.log("[PROFILE SEED] Disconnecting from database...");
+  logger.info("[PROFILE SEED] Disconnecting from database...");
   await disconnectSeedClient();
-  console.log("[PROFILE SEED] Seeder finished.");
+  logger.info("[PROFILE SEED] Seeder finished.");
+    await flushFileLogger(logger);
 }

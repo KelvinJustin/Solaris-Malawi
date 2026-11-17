@@ -22,17 +22,26 @@
  */
 
 import { NestFactory } from '@nestjs/core';
+import type { LoggerService } from '@nestjs/common';
 import { Command, Option } from 'commander';
+import dotenv from 'dotenv';
+
 import bcrypt from 'bcrypt';
 import { DatabaseService } from '../database/database.service.js';
 import { AdminRole, AdminStatus } from '../generated/prisma/client.js';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from '../database/database.module.js';
+import {
+    createFileLogger,
+    flushFileLogger,
+} from '../logging/file-logger.js';
 
 // ============================================================
 // CLI
 // ============================================================
+
+dotenv.config();
 
 const program = new Command()
     .name('create-admin')
@@ -54,6 +63,34 @@ const opts = program.opts<{
     role: AdminRole;
 }>();
 
+const logger = createFileLogger('admin-provisioning');
+
+const nestLogger: LoggerService = {
+    log(message: any, ...optionalParams: any[]) {
+        logger.info({ context: optionalParams.at(-1) }, message);
+    },
+    error(message: any, ...optionalParams: any[]) {
+        logger.error(
+            {
+                context: optionalParams.at(-1),
+                trace: optionalParams.length > 1 ? optionalParams[0] : undefined,
+            },
+            message,
+        );
+    },
+    warn(message: any, ...optionalParams: any[]) {
+        logger.warn({ context: optionalParams.at(-1) }, message);
+    },
+    debug(message: any, ...optionalParams: any[]) {
+        logger.debug({ context: optionalParams.at(-1) }, message);
+    },
+    verbose(message: any, ...optionalParams: any[]) {
+        logger.trace({ context: optionalParams.at(-1) }, message);
+    },
+    fatal(message: any, ...optionalParams: any[]) {
+        logger.fatal({ context: optionalParams.at(-1) }, message);
+    },
+};
 
 @Module({
     imports: [
@@ -72,11 +109,9 @@ async function createAdmin() {
 
     // Boot only the application context — no HTTP server needed.
     const app = await NestFactory.createApplicationContext(
-    AdminProvisioningModule,
-    {
-        logger: ['error', 'warn'],
-    },
-);
+        AdminProvisioningModule,
+        { logger: nestLogger },
+    );
 
     try {
         const db = app.get(DatabaseService);
@@ -105,17 +140,19 @@ async function createAdmin() {
             },
         });
 
-        console.log('\n✔ Admin created successfully\n');
-        console.table(admin);
+        logger.info(
+            { adminId: admin.id, role: admin.role },
+            'Admin created successfully',
+        );
     } finally {
         await app.close();
     }
 }
 
-createAdmin().catch((error: unknown) => {
-    console.error(
-        '\n✘ Provisioning failed:',
-        error instanceof Error ? error.message : error,
-    );
-    process.exitCode = 1;
-});
+createAdmin()
+    .then(() => flushFileLogger(logger))
+    .catch(async (error: unknown) => {
+        logger.error({ err: error }, 'Admin provisioning failed');
+        await flushFileLogger(logger);
+        process.exitCode = 1;
+    });

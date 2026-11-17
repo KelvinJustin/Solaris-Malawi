@@ -10,6 +10,12 @@ import {
   prisma,
   disconnectSeedClient,
 } from "./seed-client.js";
+import {
+  createFileLogger,
+  flushFileLogger,
+} from "../../src/logging/file-logger.js";
+
+const logger = createFileLogger("admin-seeder");
 
 const fixture = {
   name: "Development Compliance Admin",
@@ -19,13 +25,13 @@ const fixture = {
 };
 
 async function main(): Promise<void> {
-  console.log("[ADMIN SEED] Seeder loaded.");
-  console.log(`[ADMIN SEED] Preparing admin: ${fixture.email}`);
-  console.log("[ADMIN SEED] Hashing development password...");
+  logger.info("[ADMIN SEED] Seeder loaded.");
+  logger.info({ email: fixture.email }, "[ADMIN SEED] Preparing admin");
+  logger.info("[ADMIN SEED] Hashing development password...");
 
   const passwordHash = await bcrypt.hash(fixture.password, 10);
 
-  console.log("[ADMIN SEED] Creating or updating admin...");
+  logger.info("[ADMIN SEED] Creating or updating admin...");
 
   const admin = await prisma.admin.upsert({
     where: { email: fixture.email },
@@ -45,20 +51,21 @@ async function main(): Promise<void> {
     },
   });
 
-  console.log(`[ADMIN SEED] Admin ready: ${admin.email}`);
-  console.log(`[ADMIN SEED] Role: ${admin.role}`);
-  console.log("[ADMIN SEED] SUCCESS — admin fixture seeded.");
+  logger.info({ adminId: admin.id, email: admin.email }, "[ADMIN SEED] Admin ready");
+  logger.info({ role: admin.role }, "[ADMIN SEED] Role assigned");
+  logger.info("[ADMIN SEED] SUCCESS — admin fixture seeded.");
 }
 
-console.log("[ADMIN SEED] Loading seeder...");
+logger.info("[ADMIN SEED] Loading seeder...");
 
 try {
   await main();
 } catch (error) {
-  console.error("[ADMIN SEED] FAILED:", error);
+  logger.error({ err: error }, "[ADMIN SEED] FAILED");
   process.exitCode = 1;
 } finally {
-  console.log("[ADMIN SEED] Disconnecting from database...");
+  logger.info("[ADMIN SEED] Disconnecting from database...");
   await disconnectSeedClient();
-  console.log("[ADMIN SEED] Seeder finished.");
+  logger.info("[ADMIN SEED] Seeder finished.");
+    await flushFileLogger(logger);
 }

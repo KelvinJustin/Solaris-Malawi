@@ -37,34 +37,16 @@ export class ProviderCallbacksController {
         @Headers('x-provider-timestamp') timestamp: string | undefined,
         @Headers('x-provider-signature') signature: string | undefined,
     ) {
-        console.log(
-            `[callback] incoming  ref=${body.providerReference}  attempt=${body.attemptReference}  status=${body.status}  sig=${signature?.slice(0, 12) ?? 'missing'}...`
-        );
 
         if (!request.rawBody) {
             throw new BadRequestException('Raw request body is unavailable');
         }
 
-        let result: { received: boolean; duplicate: boolean };
-
-        try {
-            result = await this.providerCallbacksService.handleCallback({
-                body,
-                rawBody: request.rawBody,
-                timestamp,
-                signature,
-            });
-        } catch (error: any) {
-            console.error(
-                `[callback] failed  ref=${body.providerReference}  attempt=${body.attemptReference}  error=${error.message}`
-            );
-            throw error;
-        }
-
-        console.log(
-            `[callback] settled  ref=${body.providerReference}  attempt=${body.attemptReference}  duplicate=${result.duplicate}`
-        );
-
-        return result;
+        return this.providerCallbacksService.handleCallback({
+            body,
+            rawBody: request.rawBody,
+            timestamp,
+            signature,
+        });
     }
 }

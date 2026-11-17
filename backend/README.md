@@ -135,6 +135,10 @@ npm run start:prod
 ```
 The API will be available at `http://localhost:3000` with all routes prefixed with `/v1`.
 
+### Logging
+
+The backend uses Pino for structured NestJS and HTTP logs. Logs are written as JSON to stdout and to rotating files under `backend/logs` by default. Docker Compose mounts this directory so log files survive container recreation. Configure `LOG_LEVEL` (`info` by default) and `LOG_DIR` (`logs` by default) in the environment. Files rotate daily or at 20 MiB, with up to 14 rotated files retained. HTTP logs use route templates and omit credentials, cookies, and raw checkout tokens.
+
 ---
 
 ## API Catalog

@@ -1,11 +1,13 @@
 import { NestFactory } from '@nestjs/core';
 import { json, type NextFunction, type Request, type Response } from 'express';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
+import { Logger } from 'nestjs-pino';
 import cookieParser from 'cookie-parser';
-import crypto from 'node:crypto';
+
 import { withQueryTags } from '@prisma/sqlcommenter-query-tags';
 import { AppModule } from './app.module.js';
 import dotenv from 'dotenv';
+import { createRequestId } from './logging/request-id.js';
 
 dotenv.config();
 
@@ -13,7 +15,9 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
     bodyParser: false,
+    bufferLogs: true,
   });
+  app.useLogger(app.get(Logger));
 
   app.use(
     json({
@@ -27,9 +31,13 @@ async function bootstrap() {
 
   app.use((req: Request, res: Response, next: NextFunction) => {
     const requestId =
-      (req.headers['x-request-id'] as string | undefined) ??
-      crypto.randomUUID();
-    const route = req.originalUrl?.split('?')[0] ?? req.url ?? 'unknown-route';
+      (req as Request & { id?: string }).id ?? createRequestId(req);
+    const requestPath =
+      req.path ?? req.originalUrl?.split('?')[0] ?? 'unknown-route';
+    const route = requestPath.replace(
+      /(\/checkout\/)[^/]+(?=\/|$)/,
+      '$1:token',
+    );
 
     return withQueryTags(
       {

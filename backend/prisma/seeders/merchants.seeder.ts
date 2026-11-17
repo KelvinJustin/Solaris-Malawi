@@ -5,6 +5,12 @@ import {
   prisma,
   disconnectSeedClient,
 } from "./seed-client.js";
+import {
+  createFileLogger,
+  flushFileLogger,
+} from "../../src/logging/file-logger.js";
+
+const logger = createFileLogger("merchant-seeder");
 
 const fixtures = [
   {
@@ -30,9 +36,9 @@ const fixtures = [
 ];
 
 async function main(): Promise<void> {
-  console.log("[MERCHANT SEED] Seeder loaded.");
-  console.log(`[MERCHANT SEED] ${fixtures.length} merchant fixtures found.`);
-  console.log("[MERCHANT SEED] Starting...");
+  logger.info("[MERCHANT SEED] Seeder loaded.");
+  logger.info({ fixtureCount: fixtures.length }, "[MERCHANT SEED] Fixtures loaded");
+  logger.info("[MERCHANT SEED] Starting...");
 
   const passwordHash = await bcrypt.hash(
     "DevSeedPassword123!",
@@ -55,7 +61,7 @@ async function main(): Promise<void> {
       },
     });
 
-    console.log(`[MERCHANT SEED] Merchant ready: ${merchant.email}`);
+    logger.info({ merchantId: merchant.id, email: merchant.email }, "[MERCHANT SEED] Merchant ready");
 
     await prisma.merchantLedger.upsert({
       where: { merchantId: merchant.id },
@@ -66,21 +72,22 @@ async function main(): Promise<void> {
       },
     });
 
-    console.log(`[MERCHANT SEED] Ledger ready: ${merchant.email}`);
+    logger.info({ merchantId: merchant.id }, "[MERCHANT SEED] Ledger ready");
   }
 
-  console.log("[MERCHANT SEED] SUCCESS — all merchant fixtures seeded.");
+  logger.info("[MERCHANT SEED] SUCCESS — all merchant fixtures seeded.");
 }
 
-console.log("[MERCHANT SEED] Loading seeder...");
+logger.info("[MERCHANT SEED] Loading seeder...");
 
 try {
   await main();
 } catch (error) {
-  console.error("[MERCHANT SEED] FAILED:", error);
+  logger.error({ err: error }, "[MERCHANT SEED] FAILED");
   process.exitCode = 1;
 } finally {
-  console.log("[MERCHANT SEED] Disconnecting from database...");
+  logger.info("[MERCHANT SEED] Disconnecting from database...");
   await disconnectSeedClient();
-  console.log("[MERCHANT SEED] Seeder finished.");
+  logger.info("[MERCHANT SEED] Seeder finished.");
+    await flushFileLogger(logger);
 }
