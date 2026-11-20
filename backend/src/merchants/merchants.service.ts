@@ -37,7 +37,22 @@ export class MerchantsService {
       await this.databaseService.merchantProfile.findUnique({
         where: { merchantId },
         include: {
-          documents: true,
+          documents: {
+            select: {
+              id: true,
+              type: true,
+              status: true,
+              mimeType: true,
+              fileSizeBytes: true,
+              rejectionNote: true,
+              reviewedAt: true,
+              expiresAt: true,
+              uploadedAt: true,
+              updatedAt: true,
+              supersededAt: true,
+              supersededByDocumentId: true,
+            },
+          },
         },
       });
 

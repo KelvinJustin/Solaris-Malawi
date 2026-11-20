@@ -27,6 +27,7 @@ import { DatabaseService } from '../database/database.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
 import { CheckoutTokenService } from './checkout-token.service.js';
+import { FeePolicyService } from '../ledger/fee-policy.service.js';
 
 // TODO: Add production logging for idempotency race conditions.
 
@@ -39,6 +40,7 @@ export class TransactionsService {
     private readonly checkoutTokenService: CheckoutTokenService,
     private readonly configService: ConfigService,
     private readonly paymentProviderRegistry: PaymentProviderRegistry,
+    private readonly feePolicyService: FeePolicyService,
   ) { }
 
   /**
@@ -100,11 +102,17 @@ export class TransactionsService {
     try {
       // The transaction and session either both persist or neither does.
       const payment = await this.databaseService.$transaction(async (tx) => {
+        const feeSnapshot = await this.feePolicyService.snapshotForPayment(tx, {
+          merchantId,
+          currency: requestData.currency,
+          amountTambala: BigInt(requestData.amountTambala),
+        });
         const transaction = await tx.paymentTransaction.create({
           data: {
             publicReference: `sp_${randomUUID().replaceAll('-', '')}`,
             merchantId,
             ...requestData,
+            ...feeSnapshot,
             idempotencyKey: key,
             status: PaymentStatus.CREATED,
           },
@@ -327,6 +335,17 @@ export class TransactionsService {
         where: {
           publicReference: reference,
           merchantId,
+        },
+        select: {
+          publicReference: true,
+          amountTambala: true,
+          currency: true,
+          status: true,
+          provider: true,
+          description: true,
+          merchantReference: true,
+          createdAt: true,
+          processedAt: true,
         },
       });
 

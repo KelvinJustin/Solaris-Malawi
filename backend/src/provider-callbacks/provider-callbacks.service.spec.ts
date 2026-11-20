@@ -9,6 +9,7 @@ import {
   PaymentStatus,
 } from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
+import { LedgerPostingService } from '../ledger/ledger-posting.service.js';
 import { ProviderCallbackStatus } from './dto/provider-callback.dto.js';
 import { ProviderCallbacksService } from './provider-callbacks.service.js';
 
@@ -17,6 +18,10 @@ describe('ProviderCallbacksService', () => {
 
   const databaseService = {
     $transaction: vi.fn(),
+  };
+
+  const ledgerPostingService = {
+    postSuccessfulPayment: vi.fn(),
   };
 
   const transactionClient = {
@@ -40,6 +45,7 @@ describe('ProviderCallbacksService', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    ledgerPostingService.postSuccessfulPayment.mockResolvedValue({});
     process.env.SIGNING_SECRET = 'local-development-secret';
     process.env.NODE_ENV = 'test';
 
@@ -48,6 +54,10 @@ describe('ProviderCallbacksService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ProviderCallbacksService,
+        {
+          provide: LedgerPostingService,
+          useValue: ledgerPostingService,
+        },
         {
           provide: DatabaseService,
           useValue: databaseService,
@@ -80,10 +90,13 @@ describe('ProviderCallbacksService', () => {
       providerReference: null,
       transaction: {
         id: 'txn-123',
+        merchantId: 'merchant-123',
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: null,
         amountTambala: 2500,
+        feeTambala: 0n,
+        merchantNetTambala: 2500n,
         currency: 'MWK',
         status: PaymentStatus.PROCESSING,
       },
@@ -119,6 +132,70 @@ describe('ProviderCallbacksService', () => {
         }),
       }),
     );
+    expect(ledgerPostingService.postSuccessfulPayment).toHaveBeenCalledWith(
+      transactionClient,
+      expect.objectContaining({
+        paymentId: 'txn-123',
+        merchantId: 'merchant-123',
+        provider: PaymentProvider.TEST,
+        amountTambala: 2500n,
+        feeTambala: 0n,
+        merchantNetTambala: 2500n,
+        source: 'CALLBACK',
+      }),
+    );
+  });
+
+  it('propagates ledger failures so payment and attempt updates roll back together', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: ProviderCallbackStatus.SUCCESSFUL,
+      occurredAt: '2025-01-01T00:00:00.000Z',
+    };
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+    let rolledBack = false;
+    databaseService.$transaction.mockImplementation(async (callback) => {
+      try {
+        return await callback(transactionClient);
+      } catch (error) {
+        rolledBack = true;
+        throw error;
+      }
+    });
+    transactionClient.paymentAttempt.findUnique.mockResolvedValue({
+      id: 'attempt-123',
+      status: PaymentAttemptStatus.PROCESSING,
+      provider: PaymentProvider.TEST,
+      providerReference: null,
+      transaction: {
+        id: 'txn-123',
+        merchantId: 'merchant-123',
+        publicReference: 'txn-123',
+        provider: PaymentProvider.TEST,
+        providerReference: null,
+        amountTambala: 2500,
+        feeTambala: 0n,
+        merchantNetTambala: 2500n,
+        currency: 'MWK',
+        status: PaymentStatus.PROCESSING,
+      },
+    });
+    transactionClient.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
+    transactionClient.paymentTransaction.updateMany.mockResolvedValue({ count: 1 });
+    ledgerPostingService.postSuccessfulPayment.mockRejectedValue(new Error('ledger unavailable'));
+
+    await expect(service.handleCallback({ body: body as any, rawBody, timestamp, signature }))
+      .rejects.toThrow('ledger unavailable');
+
+    expect(transactionClient.paymentAttempt.updateMany).toHaveBeenCalled();
+    expect(transactionClient.paymentTransaction.updateMany).toHaveBeenCalled();
+    expect(rolledBack).toBe(true);
   });
 
   it('returns duplicate=true for a repeated callback with the same final state', async () => {
@@ -163,6 +240,137 @@ describe('ProviderCallbacksService', () => {
 
     expect(transactionClient.paymentAttempt.updateMany).not.toHaveBeenCalled();
     expect(transactionClient.paymentTransaction.updateMany).not.toHaveBeenCalled();
+    expect(ledgerPostingService.postSuccessfulPayment).not.toHaveBeenCalled();
+  });
+
+  it('posts only once for concurrent duplicate success callbacks', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: ProviderCallbackStatus.SUCCESSFUL,
+      occurredAt: '2025-01-01T00:00:00.000Z',
+    };
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+    const processingRecord = {
+      id: 'attempt-123',
+      status: PaymentAttemptStatus.PROCESSING,
+      provider: PaymentProvider.TEST,
+      providerReference: null,
+      transaction: {
+        id: 'txn-123',
+        merchantId: 'merchant-123',
+        publicReference: 'txn-123',
+        provider: PaymentProvider.TEST,
+        providerReference: null,
+        amountTambala: 2500,
+        feeTambala: 0n,
+        merchantNetTambala: 2500n,
+        currency: 'MWK',
+        status: PaymentStatus.PROCESSING,
+      },
+    };
+    const succeededRecord = {
+      ...processingRecord,
+      status: PaymentAttemptStatus.SUCCEEDED,
+      providerReference: 'provider-ref-1',
+      transaction: {
+        ...processingRecord.transaction,
+        status: PaymentStatus.SUCCEEDED,
+        providerReference: 'provider-ref-1',
+      },
+    };
+    let lookupCount = 0;
+    let attemptFinalized = false;
+    let releaseTerminalRead!: () => void;
+    const terminalReadReady = new Promise<void>((resolve) => {
+      releaseTerminalRead = resolve;
+    });
+    transactionClient.paymentAttempt.findUnique.mockImplementation(async () => {
+      lookupCount += 1;
+      if (lookupCount <= 2) return processingRecord;
+      await terminalReadReady;
+      return succeededRecord;
+    });
+    transactionClient.paymentAttempt.updateMany.mockImplementation(async () => {
+      if (attemptFinalized) return { count: 0 };
+      attemptFinalized = true;
+      return { count: 1 };
+    });
+    transactionClient.paymentTransaction.updateMany.mockImplementation(async () => {
+      releaseTerminalRead();
+      return { count: 1 };
+    });
+
+    const results = await Promise.all([
+      service.handleCallback({ body: body as any, rawBody, timestamp, signature }),
+      service.handleCallback({ body: body as any, rawBody, timestamp, signature }),
+    ]);
+
+    expect(results.map((result) => result.duplicate).sort((a, b) => Number(a) - Number(b))).toEqual([false, true]);
+    expect(ledgerPostingService.postSuccessfulPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not post successful-payment entries for a failed outcome', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: ProviderCallbackStatus.FAILED,
+      occurredAt: '2025-01-01T00:00:00.000Z',
+      failureCode: 'DECLINED',
+    };
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+    transactionClient.paymentAttempt.findUnique.mockResolvedValue({
+      id: 'attempt-123',
+      status: PaymentAttemptStatus.PROCESSING,
+      provider: PaymentProvider.TEST,
+      providerReference: null,
+      transaction: {
+        id: 'txn-123',
+        publicReference: 'txn-123',
+        provider: PaymentProvider.TEST,
+        providerReference: null,
+        amountTambala: 2500,
+        currency: 'MWK',
+        status: PaymentStatus.PROCESSING,
+      },
+    });
+    transactionClient.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
+    transactionClient.paymentTransaction.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(service.handleCallback({ body: body as any, rawBody, timestamp, signature }))
+      .resolves.toEqual({ received: true, duplicate: false });
+
+    expect(ledgerPostingService.postSuccessfulPayment).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown outcome without posting', async () => {
+    const body = {
+      event: 'payment.updated',
+      providerReference: 'provider-ref-1',
+      transactionReference: 'txn-123',
+      attemptReference: 'attempt-123',
+      amount: 25,
+      currency: 'MWK',
+      provider: PaymentProvider.TEST,
+      status: 'UNKNOWN',
+      occurredAt: '2025-01-01T00:00:00.000Z',
+    };
+    const { rawBody, timestamp, signature } = makeSignedCallback(body);
+
+    await expect(service.handleCallback({ body: body as any, rawBody, timestamp, signature }))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(databaseService.$transaction).not.toHaveBeenCalled();
+    expect(ledgerPostingService.postSuccessfulPayment).not.toHaveBeenCalled();
   });
 
   it('rejects unsupported callback events before touching the database', async () => {

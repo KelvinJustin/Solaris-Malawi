@@ -48,8 +48,38 @@ Solaris/
 | **Admin Portal & Compliance** | Implemented | Admin credentials & session management, paginated merchant application review, profile approval, and rejection with audit logging. |
 | **Hosted Checkout & Transactions** | Implemented | Transaction creation with idempotency keys, cryptographically secured checkout tokens, public checkout validation, provider initiation. |
 | **Payment Provider Integrations** | In Progress (Simulator) | Provider registry with an active simulator adapter, signed HMAC callback verification, duplicate/stale callback race protection. *(Production integrations for Airtel Money, TNM Mpamba, and local bank rails are planned).* |
-| **Settlement & Ledgers** | Planned | Schema placeholders exist; financial ledger postings and merchant withdrawal workflows are under active design. |
+| **Settlement & Ledgers** | V1 foundation | Immutable double-entry payment postings, versioned fee snapshots, provider-clearing accounts, and controlled historical backfill. Settlement, withdrawals, and refunds remain out of scope. |
 | **Merchant Dashboard (UI)** | Implemented | Responsive authenticated shell, live onboarding status pill, interactive checklist, business profile summary, login/register/verify-email flows. |
+
+---
+
+## V1 Ledger Operations
+
+The ledger records successful payment callbacks synchronously in the same PostgreSQL transaction as payment and attempt finalization. It uses integer tambala, immutable postings, and merchant-pending liabilities. Provider-clearing balances represent receivables, not cash received. Existing `MerchantLedger` values are retained for reconciliation and are never imported as opening balances.
+
+The migration creates the initial active platform-wide ZERO/MWK fee policy and provider clearing accounts. Payment creation snapshots the resolved merchant override or platform default; fee changes do not recalculate existing payments. There are no fee-management or ledger-posting API endpoints.
+
+### Controlled fee policy versions
+
+Run from `backend/`. Policies are created inactive by default; `--activate` atomically deactivates the previous policy and activates the new version with audit events. Version numbers must increase by one within the merchant/currency scope.
+
+```bash
+npm run seed:fees -- --type PERCENTAGE --percentage-bps 200 --version 2 --source "approved pricing change" --activate
+npm run seed:fees -- --type FIXED --fixed-tambala 50000 --version 1 --merchant-id <merchant-uuid> --source "approved merchant agreement" --activate
+```
+
+Supported fee types are `ZERO`, `PERCENTAGE`, `FIXED`, and `HYBRID`; percentage values use basis points and fixed values are tambala. Do not activate a commercial rate without separate pricing approval.
+
+### Historical backfill and cutover
+
+Run from `backend/`. The command is dry-run/report-only unless `--apply` is provided. Reports are written under `LOG_DIR` (or `backend/logs`) and the file is created exclusively so an earlier report cannot be overwritten.
+
+```bash
+npm run ledger:backfill
+npm run ledger:backfill -- --apply
+```
+
+Eligibility requires a successful payment, matching successful attempt/provider references, completion timestamps, and an active provider-clearing account mapping. Each payment is posted in its own transaction and uses the migration-created zero-fee snapshot where no reliable historic fee data exists. A failed posting is reported and can be retried safely. Review ambiguous payments, nonzero legacy `MerchantLedger` rows, and settlement/withdrawal/refund history before treating reconstructed pending balances as authoritative. Never run `--apply` against production without a reviewed dry-run and reconciliation approval.
 
 ---
 
@@ -104,8 +134,8 @@ Update `backend/.env` with your PostgreSQL database credentials and required sec
 Install dependencies and run database migrations:
 ```bash
 npm install
-npx prisma generate
-npx prisma migrate deploy
+npx prisma generate --config prisma7.config.ts
+npx prisma migrate deploy --config prisma7.config.ts
 ```
 
 *(Optional)* Seed initial admin and test data:
@@ -240,6 +270,8 @@ npm run test:watch    # Watch mode
 Comprehensive technical and domain documentation is available in `backend/docs/`:
 
 - [**Architecture Overview**](./backend/docs/architecture/overview.md) — Modular monolith design, guards, and system interactions
+- [**Ledger Module & Cutover Guide**](./backend/docs/architecture/ledgerModule.md) — Double-entry payment postings, fee policies, and controlled historical backfill
+- [**Logging & Request Correlation**](./backend/docs/development/logging.md) — Pino file/stdout targets, rotation, redaction, and operations
 - [**Auth Contract**](./backend/docs/architecture/authContract.md) — Cookie-based authentication and security specifications
 - [**Development Setup**](./backend/docs/development/setup.md) — Local prerequisites, tooling, and database preparation
 - [**Database Setup**](./backend/docs/database/setup.md) — Prisma schema details, migrations, and PostgreSQL setup

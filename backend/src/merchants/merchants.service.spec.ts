@@ -167,7 +167,24 @@ describe('MerchantsService', () => {
             ).toHaveBeenCalledWith(
                 expect.objectContaining({
                     where: { merchantId },
-                    include: { documents: true },
+                    include: {
+                        documents: {
+                            select: {
+                                id: true,
+                                type: true,
+                                status: true,
+                                mimeType: true,
+                                fileSizeBytes: true,
+                                rejectionNote: true,
+                                reviewedAt: true,
+                                expiresAt: true,
+                                uploadedAt: true,
+                                updatedAt: true,
+                                supersededAt: true,
+                                supersededByDocumentId: true,
+                            },
+                        },
+                    },
                 }),
             );
         });

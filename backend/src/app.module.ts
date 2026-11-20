@@ -17,6 +17,7 @@ import { PaymentProvidersModule } from './payment-providers/payment-providers.mo
 import { ProviderCallbacksModule } from './provider-callbacks/provider-callbacks.module.js';
 import { StorageModule } from './storage/storage.module.js';
 import { AnalyticsModule } from './analytics/analytics.module.js';
+import { SettlementsModule } from './settlements/settlements.module.js';
 
 @Module({
   imports: [
@@ -90,6 +91,7 @@ import { AnalyticsModule } from './analytics/analytics.module.js';
     ProviderCallbacksModule,
     StorageModule,
     AnalyticsModule,
+    SettlementsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

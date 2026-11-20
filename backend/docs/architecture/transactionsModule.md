@@ -322,7 +322,15 @@ If the callback is a duplicate of a previously processed final result, the API a
 - mismatched transaction/provider references are rejected with `409 Conflict`
 - contradictory or terminal-state changes are rejected rather than silently overwriting final state
 
-## 6. Payment state model
+## 6. Successful callback ledger posting
+
+After a signed callback validates and conditionally transitions a payment and attempt to `SUCCEEDED`, the callback handler invokes `LedgerPostingService` with the same `Prisma.TransactionClient`. Payment status, attempt status, ledger transaction, entries, and balance projections commit or roll back together. Failed or unsupported outcomes do not create successful-payment ledger entries. Duplicate/concurrent callbacks cannot post the payment twice.
+
+The posting uses the immutable fee snapshot stored when the payment was created. It does not query the current fee policy or recalculate the historical fee. Provider clearing is recorded as a receivable; it does not imply provider cash has settled. No external request, notification, webhook delivery, worker, or outbox is part of this transaction.
+
+For the accounts, entry directions, fee configuration, and historical backfill/cutover instructions, see the [ledger module guide](./ledgerModule.md). No ledger posting endpoint is exposed.
+
+## 7. Payment state model
 
 The implemented status flow is intentionally conservative.
 
@@ -342,7 +350,7 @@ Provider attempts also track their own granular state:
 - `FAILED`
 - `UNKNOWN`
 
-## 7. Production caveats
+## 8. Production caveats
 
 This implementation is intentionally a backend payment workflow, not a complete production settlement stack. The current live provider adapter is a local/test implementation. Production deployments should:
 
@@ -350,4 +358,4 @@ This implementation is intentionally a backend payment workflow, not a complete 
 - set a strong `SIGNING_SECRET` for provider callbacks
 - disable the `TEST` provider in production
 - add real provider adapters for Airtel Money and TNM Mpamba as needed
-- add worker reconciliation and settlement workflows for payment status processing
+- implement provider settlement and payment reconciliation workflows before treating pending ledger amounts as settled or withdrawable

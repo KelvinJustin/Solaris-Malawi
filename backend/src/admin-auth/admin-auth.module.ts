@@ -8,6 +8,7 @@ import { DatabaseModule } from '../database/database.module.js';
 import { AdminAuthService } from './admin-auth.service.js';
 import { AdminJwtStrategy } from './admin-jwt.strategy.js';
 import { AdminAuthController } from './admin-auth.controller.js';
+import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { AdminAuthController } from './admin-auth.controller.js';
   providers: [
     AdminAuthService,
     AdminJwtStrategy,
+    ArcjetGuard,
   ],
   exports: [AdminAuthService],
 })

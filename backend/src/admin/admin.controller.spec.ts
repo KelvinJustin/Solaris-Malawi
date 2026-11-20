@@ -201,7 +201,7 @@ describe('AdminController', () => {
       'returns HTTP 400 for a non-string reason (%j) before calling the service',
       (reason) => {
         try {
-          void controller.rejectMerchantApplication('profile-123', request, reason);
+          void controller.rejectMerchantApplication('profile-123', request, { reason } as any);
           throw new Error('Expected rejection reason validation to fail');
         } catch (error) {
           expect(error).toBeInstanceOf(BadRequestException);
@@ -211,12 +211,21 @@ describe('AdminController', () => {
       },
     );
 
+    it('rejects oversized reasons before calling the service', () => {
+      expect(() =>
+        controller.rejectMerchantApplication('profile-123', request, {
+          reason: 'x'.repeat(1001),
+        }),
+      ).toThrow(BadRequestException);
+      expect(adminService.rejectMerchantApplication).not.toHaveBeenCalled();
+    });
+
     it('passes a validated string and the authenticated admin ID to the service', async () => {
       const result = { profileId: 'profile-123', accountStatus: 'REJECTED' };
       adminService.rejectMerchantApplication.mockResolvedValue(result);
 
       await expect(
-        controller.rejectMerchantApplication('profile-123', request, 'Invalid document'),
+        controller.rejectMerchantApplication('profile-123', request, { reason: 'Invalid document' }),
       ).resolves.toEqual(result);
 
       expect(adminService.rejectMerchantApplication).toHaveBeenCalledWith(

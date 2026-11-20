@@ -11,11 +11,12 @@ const seeders = {
   profiles: "./seeders/profiles.seeder.ts",
   merchants: "./seeders/merchants.seeder.ts",
   admin: "./seeders/admin.seeder.ts",
+  fees: "./seeders/fee-policies.seeder.ts",
 } as const;
 
 if (!seedType || !(seedType in seeders)) {
   const logger = createFileLogger("prisma-seed");
-  logger.error("Specify a valid seeder: profiles, merchants, or admin.");
+  logger.error("Specify a valid seeder: profiles, merchants, admin, or fees.");
   process.exitCode = 1;
   await flushFileLogger(logger);
 } else {

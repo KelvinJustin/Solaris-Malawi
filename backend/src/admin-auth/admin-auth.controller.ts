@@ -16,6 +16,7 @@ import type { CookieOptions, Request, Response } from 'express';
 import { AdminAuthService } from './admin-auth.service.js';
 import { AdminJwtAuthGuard } from './admin-jwt-auth.guard.js';
 import { AdminLoginDto } from './dto/admin-login.dto.js';
+import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
 
 interface AdminRequestUser {
     adminId: string;
@@ -55,6 +56,7 @@ export class AdminAuthController {
      * Logs an internal admin in and sets the short-lived admin session cookie.
      */
     @Post('login')
+    @UseGuards(ArcjetGuard)
     @HttpCode(HttpStatus.OK)
     async login(
         @Body() dto: AdminLoginDto,

@@ -2,7 +2,7 @@
 
 This document reflects the architecture currently implemented in the repository rather than a long-term idealized roadmap.
 
-The implementation also contains granular API documentation under [docs/architecture](./). For endpoint-level contract details, see [apiReference.md](./apiReference.md) and the module guides for [authContract.md](./authContract.md), [adminModule.md](./adminModule.md), [merchantModule.md](./merchantModule.md), and [transactionsModule.md](./transactionsModule.md).
+The implementation also contains granular API and module documentation under [docs/architecture](./). For endpoint-level contract details, see [apiReference.md](./apiReference.md) and the module guides for [authContract.md](./authContract.md), [adminModule.md](./adminModule.md), [merchantModule.md](./merchantModule.md), [transactionsModule.md](./transactionsModule.md), and [ledgerModule.md](./ledgerModule.md). Logging operations are documented in [development/logging.md](../development/logging.md).
 
 ## 1. Current system shape
 
@@ -21,6 +21,7 @@ Solaris API (/v1)
         ├── transactions
         ├── payment-providers
         ├── provider-callbacks
+        ├── ledger
         ├── storage
         ├── email
         └── arcjet
@@ -28,7 +29,7 @@ Solaris API (/v1)
         ▼
 PostgreSQL + Prisma
         │
-        └── Merchant, profile, document, review, payment, and callback data
+        └── Merchant, profile, document, review, payment, ledger, and callback data
 
 Local development infrastructure:
 - Redis via Docker Compose
@@ -72,6 +73,7 @@ The `transactions`, `checkout`, `payment-providers`, and `provider-callbacks` mo
 - provider adapter registration
 - a simulator provider for local testing
 - signed callback verification and payment-state transitions
+- immutable double-entry payment postings and fee snapshots in `ledger`
 
 This is more than a placeholder. It is an implemented payment lifecycle, but it is intentionally scoped and not a complete production settlement system.
 
@@ -96,7 +98,15 @@ Callback handling is implemented in `src/provider-callbacks/provider-callbacks.s
 
 This protects the payment state from race conditions and duplicate callback payloads.
 
-## 5. Storage layer
+## 5. Ledger and financial cutover
+
+The `ledger` module is called by payment creation and successful callback processing. Fee policies are resolved and snapshotted when a payment is created; only a valid successful callback creates a payment posting. The callback's payment, attempt, entries, ledger transaction, and balance projections commit or roll back together.
+
+The V1 posting debits provider clearing and credits merchant pending settlement plus nonzero platform fee revenue. Provider clearing is a receivable, not proof of cash settlement. Historical backfill is controlled and dry-run by default. The legacy `MerchantLedger` is retained for reconciliation and is not imported as an opening balance. See [ledgerModule.md](./ledgerModule.md) for the account model, operational commands, backfill rules, and cutover limitations.
+
+Settlements, withdrawals, refunds, available-balance operations, and public ledger APIs are not implemented.
+
+## 6. Storage layer
 
 The `storage` module integrates with Cloudflare R2 using the AWS S3 SDK:
 
@@ -108,19 +118,18 @@ The `storage` module integrates with Cloudflare R2 using the AWS S3 SDK:
 
 The actual document upload flow is implemented, but it remains a backend-only storage workflow. It is not yet a full user-facing file management UI.
 
-## 6. Important limitations
+## 7. Important limitations
 
 The current repository does not yet implement:
 
 - Airtel Money or TNM Mpamba production adapters
-- settlement or withdrawal workflows
-- double-entry ledger posting
-- routine payment reconciliation jobs
-- durable asynchronous worker infrastructure for retries and webhooks
+- provider settlement, withdrawal, refund, reversal, or merchant availability workflows
+- routine payment/provider reconciliation jobs
+- durable asynchronous worker infrastructure for unrelated retries and webhook delivery
 - production deployment hardening or multi-service operations
 
 The architecture is therefore current and valid for the implemented code, but it is not a complete production payment platform design document.
 
-## 7. Design direction
+## 8. Design direction
 
 The project is intentionally a modular monolith for now. It keeps separate business domains and allows later extraction if the operational need becomes real. The codebase already reflects this boundary-oriented structure without requiring distributed services today.

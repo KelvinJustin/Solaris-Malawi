@@ -18,11 +18,28 @@ The **Solaris Malawi Backend** is a NestJS 12 modular monolith providing a payme
 - **Admin Review:** Admin authentication, paginated merchant applications listing, review assignment, and approve/reject workflows with audit history.
 - **Transactions & Hosted Checkout:** Cryptographically encrypted checkout tokens, idempotent transaction creation, hosted checkout session validation, and payment initiation.
 - **Provider Orchestration:** Provider registry with an active simulator/test adapter, signed provider webhook callback handling with HMAC verification, and idempotency guards against stale/duplicate events.
-- **Persistence:** Relational modeling for merchants, profiles, documents, transactions, and payment attempts via Prisma 7 & PostgreSQL.
+- **Persistence:** Relational modeling for merchants, payment lifecycle, versioned fee policies, and immutable double-entry payment postings via Prisma 7 & PostgreSQL.
 
 ### Roadmap / Not Yet Implemented
 - Live telecom & bank provider adapters (Airtel Money OpenAPI, TNM Mpamba, National Bank, Standard Bank).
-- Automated settlement, ledger balance posting, and merchant withdrawal workflows.
+- Provider settlement, withdrawals, refunds, and merchant balance APIs.
+
+### V1 Ledger Foundation
+Successful signed callbacks post balanced entries synchronously in the same PostgreSQL transaction as payment and attempt state changes. Payment creation stores an immutable fee snapshot using the active merchant override or platform default; the migration seeds a ZERO/MWK platform policy. Provider-clearing accounts represent receivables, not settled cash. Legacy `MerchantLedger` balances are reported for reconciliation only and are never converted into opening balances.
+
+No fee or ledger posting API is exposed. From `backend/`, create a new controlled policy version with the `seed:fees` command; new policies are inactive unless `--activate` is specified. The version and activation changes are audited.
+
+```bash
+npm run seed:fees -- --type PERCENTAGE --percentage-bps 200 --version 2 --source "approved pricing change" --activate
+npm run seed:fees -- --type FIXED --fixed-tambala 50000 --version 1 --merchant-id <merchant-uuid> --source "approved merchant agreement" --activate
+```
+
+The historical backfill is report-only by default. Review its report and reconcile settlement, withdrawal, refund, adjustment, and legacy balances before applying or treating pending balances as authoritative.
+
+```bash
+npm run ledger:backfill
+npm run ledger:backfill -- --apply
+```
 
 ---
 
@@ -43,6 +60,7 @@ Solaris API (/v1)
   ├── transactions/         # Payment transactions & hosted checkout flow
   ├── payment-providers/    # Provider registry & test simulator adapter
   ├── provider-callbacks/   # Signed webhook callback verification
+  ├── ledger/               # Fee snapshots and immutable double-entry posting
   ├── storage/              # Cloudflare R2 pre-signed upload URLs
   ├── email/                # Nodemailer SMTP email delivery service
   ├── arcjet/               # Rate limiting, bot protection, & attack shielding
@@ -63,6 +81,7 @@ PostgreSQL 15+ (Prisma 7)  +  Redis 6 (Cache & Session Revocation)
 | `transactions` | Idempotent transaction generation, checkout session initialization, customer payment initiation. |
 | `payment-providers` | Provider adapter abstraction, payload transformation, dispatching calls to provider gateway. |
 | `provider-callbacks` | Cryptographic signature verification, idempotent payment success/failure state transitions. |
+| `ledger` | Versioned fee snapshots, double-entry payment posting, and historical backfill primitives. |
 | `storage` | Cloudflare R2 S3-compatible client, generating pre-signed PUT URLs for KYC uploads. |
 | `email` | Transactional email delivery (registration OTP, login verification codes). |
 | `arcjet` | Security middleware guarding against brute force attacks and malicious clients. |
@@ -107,8 +126,8 @@ Review and configure your `backend/.env` file. Essential configuration includes:
 ### 3. Install Dependencies & Migrate Database
 ```bash
 npm install
-npx prisma generate
-npx prisma migrate deploy
+npx prisma generate --config prisma7.config.ts
+npx prisma migrate deploy --config prisma7.config.ts
 ```
 
 ### 4. Seed Data (Optional)
@@ -225,6 +244,8 @@ Detailed technical documents are stored in the `docs/` directory:
 - [Architecture Overview](./docs/architecture/overview.md)
 - [Auth Contract & Cookies](./docs/architecture/authContract.md)
 - [Database Schema & Migrations](./docs/database/setup.md)
+- [Ledger Module & Cutover Guide](./docs/architecture/ledgerModule.md)
+- [Logging & Request Correlation](./docs/development/logging.md)
 - [Development Workflow & Setup](./docs/development/setup.md)
 - [Unit Testing Architecture](./docs/development/unitTesting.md)
 - [Business Product Context](./docs/business/product-overview.md)

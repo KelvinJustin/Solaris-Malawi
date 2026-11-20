@@ -8,11 +8,14 @@ import { TransactionsController } from './transactions.controller.js';
 import { CheckoutController } from './checkout.controller.js';
 import { TransactionsService } from './transactions.service.js';
 import { CheckoutTokenService } from './checkout-token.service.js';
+import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
+import { LedgerModule } from '../ledger/ledger.module.js';
 
 @Module({
   imports: [
     DatabaseModule,
     PaymentProvidersModule,
+    LedgerModule,
   ],
   controllers: [
     TransactionsController,
@@ -21,6 +24,7 @@ import { CheckoutTokenService } from './checkout-token.service.js';
   providers: [
     TransactionsService,
     CheckoutTokenService,
+    ArcjetGuard,
   ],
 })
 export class TransactionsModule {}

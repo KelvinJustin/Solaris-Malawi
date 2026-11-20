@@ -60,7 +60,7 @@ datasource db {
 After changing the schema, regenerate the client:
 
 ```bash
-npx prisma generate
+npx prisma generate --config prisma7.config.ts
 ```
 
 ## 4. Database service implementation
@@ -82,16 +82,16 @@ This is the authoritative database integration in the application.
 Apply existing migrations with:
 
 ```bash
-npx prisma migrate deploy
+npx prisma migrate deploy --config prisma7.config.ts
 ```
 
 Create a new migration during development:
 
 ```bash
-npx prisma migrate dev --name <migration_name>
+npx prisma migrate dev --config prisma7.config.ts --name <migration_name>
 ```
 
-For quick schema experiments without migration files, `prisma db push` is available, but the project primarily uses migrations in `prisma/migrations/`.
+For quick schema experiments without migration files, `prisma db push` is available, but the project primarily uses migrations in `prisma/migrations/`. Do not use `db push` as a substitute for migrations that include custom PostgreSQL indexes, constraints, or triggers; the ledger migration includes partial unique indexes and database triggers that are represented only in SQL.
 
 ## 6. Current schema focus
 
@@ -108,18 +108,20 @@ The existing schema includes models for:
 - `PaymentTransaction`
 - `PaymentAttempt`
 - `CheckoutSession`
-- `MerchantLedger`
+- `MerchantLedger` (legacy balances retained for reconciliation)
+- `FeePolicy` and `FeePolicyAuditEvent`
+- `LedgerAccount`, `LedgerTransaction`, `LedgerEntry`, and `LedgerAccountBalance`
 
-The financial/payment part of the schema is real and active in the repository. It is not just a future placeholder.
+The financial/payment part of the schema is active. Payment fees are snapshotted at creation, and successful verified provider callbacks post to the ledger in the same database transaction as payment and attempt updates. See the [ledger module guide](../architecture/ledgerModule.md) for accounting behavior and historical cutover precautions.
 
 ## 7. Database validation and maintenance
 
 Useful commands:
 
 ```bash
-npx prisma generate
-npx prisma migrate status
-npx prisma studio
+npx prisma generate --config prisma7.config.ts
+npx prisma migrate status --config prisma7.config.ts
+npx prisma studio --config prisma7.config.ts
 ```
 
 The app expects a working PostgreSQL database before it can initialize. The `DatabaseService` fails startup if the connection is missing or invalid.

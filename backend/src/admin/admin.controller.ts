@@ -17,6 +17,7 @@ import { AdminService } from './admin.service.js';
 import { AdminRole } from '../generated/prisma/enums.js';
 import { AdminRoles } from '../admin-auth/admin-roles.decorator.js';
 import { AdminRolesGuard } from '../admin-auth/admin-roles.guard.js';
+import { RejectMerchantApplicationDto } from './dto/reject-merchant-application.dto.js';
 
 @Controller('admin')
 @UseGuards(AdminJwtAuthGuard, AdminRolesGuard)
@@ -99,10 +100,10 @@ export class AdminController {
   rejectMerchantApplication(
     @Param('profileId') profileId: string,
     @Req() request: Request,
-    @Body('reason') reason: unknown,
+    @Body() dto: RejectMerchantApplicationDto,
   ) {
-    if (typeof reason !== 'string') {
-      throw new BadRequestException('A rejection reason must be a string.');
+    if (!dto || typeof dto.reason !== 'string' || dto.reason.length > 1000) {
+      throw new BadRequestException('A valid rejection reason is required.');
     }
 
     // Extract the authenticated admin identity from the request context.
@@ -115,7 +116,7 @@ export class AdminController {
     return this.adminService.rejectMerchantApplication(
       profileId,
       admin.adminId,
-      reason,
+      dto.reason,
     );
   }
 

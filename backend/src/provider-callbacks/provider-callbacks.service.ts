@@ -12,6 +12,7 @@ import {
 } from '../generated/prisma/enums.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { DatabaseService } from '../database/database.service.js';
+import { LedgerPostingService } from '../ledger/ledger-posting.service.js';
 import {
     ProviderCallbackDto,
     ProviderCallbackStatus,
@@ -28,7 +29,10 @@ interface CallbackInput {
 export class ProviderCallbacksService {
     private readonly maxTimestampAgeMs = 5 * 60 * 1000;
 
-    constructor(private readonly database: DatabaseService) { }
+    constructor(
+        private readonly database: DatabaseService,
+        private readonly ledgerPostingService: LedgerPostingService,
+    ) { }
 
     /**
      * Handles the signed provider webhook for a payment update.
@@ -44,6 +48,9 @@ export class ProviderCallbacksService {
 
         if (body.event !== 'payment.updated') {
             throw new BadRequestException('Unsupported callback event');
+        }
+        if (!Object.values(ProviderCallbackStatus).includes(body.status)) {
+            throw new BadRequestException('Unsupported callback payment status');
         }
 
         // The simulator sends amount in MWK; the database stores tambala.
@@ -238,6 +245,26 @@ export class ProviderCallbacksService {
                 throw new ConflictException(
                     'Payment changed while processing the callback.',
                 );
+            }
+
+            if (expectedStatus === PaymentStatus.SUCCEEDED) {
+                if (!transaction.provider || transaction.merchantNetTambala === null) {
+                    throw new InternalServerErrorException(
+                        'Successful payment is missing its immutable ledger snapshot',
+                    );
+                }
+
+                await this.ledgerPostingService.postSuccessfulPayment(tx, {
+                    paymentId: transaction.id,
+                    publicReference: transaction.publicReference,
+                    merchantId: transaction.merchantId,
+                    provider: transaction.provider,
+                    amountTambala: BigInt(transaction.amountTambala),
+                    feeTambala: transaction.feeTambala,
+                    merchantNetTambala: transaction.merchantNetTambala,
+                    currency: transaction.currency,
+                    source: 'CALLBACK',
+                });
             }
 
             return { received: true, duplicate: false };

@@ -1,8 +1,17 @@
 
-import { Controller, Get, NotFoundException, Param, Body, Post } from '@nestjs/common';
+import {
+    Body,
+    Controller,
+    Get,
+    NotFoundException,
+    Param,
+    Post,
+    UseGuards,
+} from '@nestjs/common';
 
 import { TransactionsService } from './transactions.service.js';
 import { InitiateCheckoutPaymentDto } from './dto/initiate-checkout-payment.dto.js';
+import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
 
 /**
  * Public endpoints used by customers opening a hosted checkout link.
@@ -32,6 +41,7 @@ export class CheckoutController {
  * Request a payment initiation for an active checkout session.
  */
     @Post(':token/pay')
+    @UseGuards(ArcjetGuard)
     async initiatePayment(
         @Param('token') token: string,
         @Body() dto: InitiateCheckoutPaymentDto,

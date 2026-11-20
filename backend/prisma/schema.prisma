@@ -101,6 +101,7 @@ enum PaymentProvider {
   AIRTEL_MONEY
   TN_MPAMBA    @map("TNM_MPAMBA")
   TEST
+  NOWPAYMENTS
 }
 
 // Tracks the granular status of an individual payment gateway attempt.
@@ -110,6 +111,119 @@ enum PaymentAttemptStatus {
   SUCCEEDED
   FAILED
   UNKNOWN
+}
+
+enum FeeType {
+  ZERO
+  PERCENTAGE
+  FIXED
+  HYBRID
+}
+
+enum FeePolicyAuditAction {
+  CREATED
+  ACTIVATED
+  DEACTIVATED
+}
+
+enum LedgerAccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum LedgerNormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerAccountStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+enum LedgerTransactionType {
+  PAYMENT_CAPTURE
+  PROVIDER_SETTLEMENT
+}
+
+enum LedgerTransactionStatus {
+  PENDING
+  POSTED
+}
+
+enum LedgerEntryDirection {
+  DEBIT
+  CREDIT
+}
+
+enum SettlementImportStatus {
+  IMPORTED
+  VALIDATION_FAILED
+  DUPLICATE
+}
+
+enum SettlementBatchStatus {
+  IMPORTED
+  VALIDATED
+  RECONCILING
+  PARTIALLY_RECONCILED
+  RECONCILED
+  APPROVED
+  POSTED
+  DISCREPANCY
+  REJECTED
+}
+
+enum SettlementItemKind {
+  PAYMENT
+  PROVIDER_FEE
+  UNSUPPORTED
+  INVALID
+}
+
+enum SettlementItemMatchStatus {
+  PENDING
+  MATCHED
+  UNMATCHED
+  AMBIGUOUS
+  DUPLICATE
+  AMOUNT_MISMATCH
+  CURRENCY_MISMATCH
+  UNSUPPORTED
+  INVALID
+  NOT_APPLICABLE
+}
+
+enum BankStatementImportStatus {
+  IMPORTED
+  VALIDATION_FAILED
+  DUPLICATE
+}
+
+enum BankStatementLineStatus {
+  VALID
+  VALIDATION_FAILED
+  DUPLICATE
+}
+
+enum SettlementAllocationStatus {
+  ACTIVE
+  REVERSED
+}
+
+enum SettlementAuditEventType {
+  PROVIDER_IMPORT_CREATED
+  BANK_IMPORT_CREATED
+  ITEM_MATCHED
+  ITEM_UNMATCHED
+  BANK_ALLOCATION_CREATED
+  BANK_ALLOCATION_REVERSED
+  BATCH_APPROVED
+  BATCH_POSTED
 }
 
 // ==========================================
@@ -134,26 +248,35 @@ model Merchant {
   profile             MerchantProfile?
   ledger              MerchantLedger?
   paymentTransactions PaymentTransaction[]
+  feePolicies         FeePolicy[]
+  ledgerAccounts      LedgerAccount[]
 
   @@map("merchants")
 }
 
 // Amounts are stored in integer tambala (1 MWK = 100 tambala).
-// A succeeded payment does not automatically settle to the ledger.
+// Successful confirmation posts a provider receivable and pending merchant payable; cash settlement is separate.
 model PaymentTransaction {
-  id                String           @id @default(uuid()) @db.Uuid
-  publicReference   String           @unique // Solaris-generated; never expose the DB id externally.
-  merchantId        String           @db.Uuid
+  id                 String           @id @default(uuid()) @db.Uuid
+  publicReference    String           @unique // Solaris-generated; never expose the DB id externally.
+  merchantId         String           @db.Uuid
   // Amount stored in the smallest MWK unit: 100 tambala = MWK 1.00.
-  amountTambala     Int              @map("amount")
-  currency          String           @default("MWK")
-  status            PaymentStatus    @default(CREATED)
-  provider          PaymentProvider? // Null until a provider is selected.
-  providerReference String?
-  customerPhone     String?
-  description       String?
-  merchantReference String?
-  idempotencyKey    String // Deduplicates retried requests; scoped per merchant.
+  amountTambala      Int              @map("amount")
+  currency           String           @default("MWK")
+  feeTambala         BigInt           @default(0)
+  merchantNetTambala BigInt
+  feeType            FeeType          @default(ZERO)
+  feePercentageBps   Int              @default(0)
+  feeFixedTambala    BigInt           @default(0)
+  feePolicyId        String           @db.Uuid
+  feePolicyVersion   Int
+  status             PaymentStatus    @default(CREATED)
+  provider           PaymentProvider? // Null until a provider is selected.
+  providerReference  String?
+  customerPhone      String?
+  description        String?
+  merchantReference  String?
+  idempotencyKey     String // Deduplicates retried requests; scoped per merchant.
 
   // Sanitised diagnostics only — never store credentials or tokens here.
   failureCode    String?
@@ -163,9 +286,11 @@ model PaymentTransaction {
   updatedAt   DateTime  @updatedAt
   processedAt DateTime?
 
-  merchant         Merchant          @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  merchant         Merchant                 @relation(fields: [merchantId], references: [id], onDelete: Restrict)
   attempts         PaymentAttempt[]
   checkoutSessions CheckoutSession[]
+  feePolicy        FeePolicy                @relation(fields: [feePolicyId], references: [id], onDelete: Restrict)
+  settlementItems  ProviderSettlementItem[]
 
   @@unique([merchantId, idempotencyKey])
   @@unique([provider, providerReference])
@@ -210,9 +335,15 @@ model Admin {
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 
-  approvedProfiles   MerchantProfile[]   @relation("ProfileApprovedBy")
-  reviewedDocuments  MerchantDocument[]  @relation("DocumentReviewedBy")
-  adminRevokedTokens AdminRevokedToken[]
+  approvedProfiles              MerchantProfile[]          @relation("ProfileApprovedBy")
+  reviewedDocuments             MerchantDocument[]         @relation("DocumentReviewedBy")
+  adminRevokedTokens            AdminRevokedToken[]
+  providerSettlementImports     ProviderSettlementImport[] @relation("ProviderSettlementImportActor")
+  bankStatementImports          BankStatementImport[]      @relation("BankStatementImportActor")
+  settlementApprovals           ProviderSettlementBatch[]  @relation("SettlementBatchApprover")
+  settlementAllocations         SettlementBankAllocation[] @relation("SettlementAllocationActor")
+  settlementAllocationReversals SettlementBankAllocation[] @relation("SettlementAllocationReverser")
+  settlementAuditEvents         SettlementAuditEvent[]
 
   @@index([role, status])
   @@map("admins")
@@ -300,11 +431,11 @@ model MerchantProfile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  merchant          Merchant                @relation(fields: [merchantId], references: [id], onDelete: Cascade)
-  approvedBy        Admin?                  @relation("ProfileApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
-  documents         MerchantDocument[]
-  reviewHistory     MerchantReviewHistory[]
-  documentUploads   MerchantDocumentUpload[]
+  merchant        Merchant                 @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  approvedBy      Admin?                   @relation("ProfileApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  documents       MerchantDocument[]
+  reviewHistory   MerchantReviewHistory[]
+  documentUploads MerchantDocumentUpload[]
 
   @@map("merchant_profiles")
 }
@@ -362,6 +493,310 @@ model MerchantReviewHistory {
 
 // Balances in integer tambala (1 MWK = 100 tambala).
 // availableBalance = settled funds; pendingBalance = not yet settled.
+model FeePolicy {
+  id                 String   @id @default(uuid()) @db.Uuid
+  merchantId         String?  @db.Uuid
+  type               FeeType
+  percentageBps      Int      @default(0)
+  fixedAmountTambala BigInt   @default(0)
+  currency           String   @db.VarChar(3)
+  version            Int
+  active             Boolean  @default(true)
+  source             String
+  createdAt          DateTime @default(now())
+
+  merchant    Merchant?             @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  payments    PaymentTransaction[]
+  auditEvents FeePolicyAuditEvent[]
+
+  @@index([merchantId, currency, active])
+  @@map("fee_policies")
+}
+
+model FeePolicyAuditEvent {
+  id         String               @id @default(uuid()) @db.Uuid
+  policyId   String               @db.Uuid
+  action     FeePolicyAuditAction
+  source     String
+  occurredAt DateTime             @default(now())
+
+  policy FeePolicy @relation(fields: [policyId], references: [id], onDelete: Restrict)
+
+  @@index([policyId, occurredAt])
+  @@map("fee_policy_audit_events")
+}
+
+model LedgerAccount {
+  id            String              @id @default(uuid()) @db.Uuid
+  key           String              @unique
+  code          String
+  name          String
+  type          LedgerAccountType
+  normalBalance LedgerNormalBalance
+  status        LedgerAccountStatus @default(ACTIVE)
+  currency      String              @db.VarChar(3)
+  merchantId    String?             @db.Uuid
+  provider      PaymentProvider?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  merchant Merchant?             @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  entries  LedgerEntry[]
+  balance  LedgerAccountBalance?
+
+  @@index([merchantId, currency])
+  @@index([provider, currency])
+  @@index([type, status])
+  @@map("ledger_accounts")
+}
+
+model LedgerAccountBalance {
+  id          String   @id @default(uuid()) @db.Uuid
+  accountId   String   @unique @db.Uuid
+  debitTotal  BigInt   @default(0)
+  creditTotal BigInt   @default(0)
+  updatedAt   DateTime @updatedAt
+
+  account LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@map("ledger_account_balances")
+}
+
+model LedgerTransaction {
+  id             String                  @id @default(uuid()) @db.Uuid
+  reference      String                  @unique
+  sourceType     String
+  sourceId       String
+  postingPurpose String
+  type           LedgerTransactionType
+  status         LedgerTransactionStatus @default(PENDING)
+  currency       String                  @db.VarChar(3)
+  description    String?
+  provenance     String?
+  backfilledAt   DateTime?
+  createdAt      DateTime                @default(now())
+  postedAt       DateTime?
+
+  entries         LedgerEntry[]
+  settlementBatch ProviderSettlementBatch?
+
+  @@unique([sourceType, sourceId, postingPurpose])
+  @@index([type, status, createdAt])
+  @@map("ledger_transactions")
+}
+
+model LedgerEntry {
+  id                  String               @id @default(uuid()) @db.Uuid
+  ledgerTransactionId String               @db.Uuid
+  accountId           String               @db.Uuid
+  direction           LedgerEntryDirection
+  amountTambala       BigInt
+  createdAt           DateTime             @default(now())
+
+  ledgerTransaction LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  account           LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, createdAt])
+  @@index([ledgerTransactionId])
+  @@map("ledger_entries")
+}
+
+model BankAccount {
+  id        String   @id @default(uuid()) @db.Uuid
+  reference String   @unique
+  name      String
+  currency  String   @db.VarChar(3)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  statementImports BankStatementImport[]
+  statementLines   BankStatementLine[]
+
+  @@map("bank_accounts")
+}
+
+model ProviderSettlementImport {
+  id                       String                 @id @default(uuid()) @db.Uuid
+  provider                 PaymentProvider
+  providerAccountReference String
+  sourceFileName           String
+  sourceFileChecksum       String
+  sourceObjectKey          String
+  formatIdentifier         String
+  status                   SettlementImportStatus @default(IMPORTED)
+  importedById             String                 @db.Uuid
+  importedAt               DateTime               @default(now())
+  validationErrors         Json?
+
+  importedBy Admin                     @relation("ProviderSettlementImportActor", fields: [importedById], references: [id], onDelete: Restrict)
+  batches    ProviderSettlementBatch[]
+
+  @@unique([provider, providerAccountReference, sourceFileChecksum])
+  @@index([provider, importedAt])
+  @@index([status, importedAt])
+  @@map("provider_settlement_imports")
+}
+
+model ProviderSettlementBatch {
+  id                       String                @id @default(uuid()) @db.Uuid
+  importId                 String                @db.Uuid
+  provider                 PaymentProvider
+  providerAccountReference String
+  providerBatchReference   String
+  currency                 String                @db.VarChar(3)
+  reportPeriodStart        DateTime?
+  reportPeriodEnd          DateTime?
+  providerClosedAt         DateTime?
+  grossAmountTambala       BigInt
+  providerFeeAmountTambala BigInt
+  expectedNetAmountTambala BigInt
+  status                   SettlementBatchStatus @default(IMPORTED)
+  validationErrors         Json?
+  approvedAt               DateTime?
+  approvedById             String?               @db.Uuid
+  postedAt                 DateTime?
+  ledgerTransactionId      String?               @unique @db.Uuid
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+
+  import            ProviderSettlementImport   @relation(fields: [importId], references: [id], onDelete: Restrict)
+  approvedBy        Admin?                     @relation("SettlementBatchApprover", fields: [approvedById], references: [id], onDelete: Restrict)
+  ledgerTransaction LedgerTransaction?         @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  items             ProviderSettlementItem[]
+  bankAllocations   SettlementBankAllocation[]
+
+  @@unique([provider, providerAccountReference, currency, providerBatchReference])
+  @@index([status, createdAt])
+  @@index([provider, providerClosedAt])
+  @@map("provider_settlement_batches")
+}
+
+model ProviderSettlementItem {
+  id                       String                    @id @default(uuid()) @db.Uuid
+  batchId                  String                    @db.Uuid
+  sourceRowIdentity        String
+  providerRecordReference  String?
+  providerPaymentReference String?
+  recordKind               SettlementItemKind
+  reportedStatus           String?
+  settlementConfirmed      Boolean                   @default(false)
+  grossAmountTambala       BigInt?
+  providerFeeAmountTambala BigInt?
+  currency                 String?                   @db.VarChar(3)
+  matchingStatus           SettlementItemMatchStatus @default(PENDING)
+  matchingMethod           String?
+  paymentId                String?                   @db.Uuid
+  rawRecord                Json
+  validationErrors         Json?
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+
+  batch   ProviderSettlementBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  payment PaymentTransaction?     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@unique([batchId, sourceRowIdentity])
+  @@index([providerPaymentReference, matchingStatus])
+  @@index([paymentId, matchingStatus])
+  @@map("provider_settlement_items")
+}
+
+model BankStatementImport {
+  id                   String                    @id @default(uuid()) @db.Uuid
+  bankAccountId        String                    @db.Uuid
+  sourceFileName       String
+  sourceFileChecksum   String
+  sourceObjectKey      String
+  formatIdentifier     String
+  statementPeriodStart DateTime?
+  statementPeriodEnd   DateTime?
+  status               BankStatementImportStatus @default(IMPORTED)
+  importedById         String                    @db.Uuid
+  importedAt           DateTime                  @default(now())
+  validationErrors     Json?
+
+  bankAccount BankAccount         @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  importedBy  Admin               @relation("BankStatementImportActor", fields: [importedById], references: [id], onDelete: Restrict)
+  lines       BankStatementLine[]
+
+  @@unique([bankAccountId, sourceFileChecksum])
+  @@index([status, importedAt])
+  @@map("bank_statement_imports")
+}
+
+model BankStatementLine {
+  id                             String                  @id @default(uuid()) @db.Uuid
+  importId                       String                  @db.Uuid
+  bankAccountId                  String                  @db.Uuid
+  sourceRowIdentity              String
+  bankReference                  String?
+  description                    String?
+  transactionDate                DateTime
+  valueDate                      DateTime?
+  creditAmountTambala            BigInt                  @default(0)
+  debitAmountTambala             BigInt                  @default(0)
+  currency                       String                  @db.VarChar(3)
+  status                         BankStatementLineStatus @default(VALID)
+  duplicateOfBankStatementLineId String?                 @db.Uuid
+  rawRecord                      Json
+  validationErrors               Json?
+  createdAt                      DateTime                @default(now())
+
+  import      BankStatementImport        @relation(fields: [importId], references: [id], onDelete: Restrict)
+  bankAccount BankAccount                @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  duplicateOf BankStatementLine?         @relation("BankStatementLineDuplicates", fields: [duplicateOfBankStatementLineId], references: [id], onDelete: Restrict)
+  duplicates  BankStatementLine[]        @relation("BankStatementLineDuplicates")
+  allocations SettlementBankAllocation[]
+
+  @@unique([importId, sourceRowIdentity])
+  @@index([bankAccountId, bankReference])
+  @@index([status, transactionDate])
+  @@map("bank_statement_lines")
+}
+
+model SettlementBankAllocation {
+  id                  String                     @id @default(uuid()) @db.Uuid
+  batchId             String                     @db.Uuid
+  bankStatementLineId String                     @db.Uuid
+  amountTambala       BigInt
+  idempotencyKey      String                     @unique
+  status              SettlementAllocationStatus @default(ACTIVE)
+  allocatedById       String                     @db.Uuid
+  reversedById        String?                    @db.Uuid
+  reversedAt          DateTime?
+  reversalReason      String?
+  createdAt           DateTime                   @default(now())
+
+  batch             ProviderSettlementBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  bankStatementLine BankStatementLine       @relation(fields: [bankStatementLineId], references: [id], onDelete: Restrict)
+  allocatedBy       Admin                   @relation("SettlementAllocationActor", fields: [allocatedById], references: [id], onDelete: Restrict)
+  reversedBy        Admin?                  @relation("SettlementAllocationReverser", fields: [reversedById], references: [id], onDelete: Restrict)
+
+  @@index([batchId, status])
+  @@index([bankStatementLineId, status])
+  @@map("settlement_bank_allocations")
+}
+
+model SettlementAuditEvent {
+  id            String                   @id @default(uuid()) @db.Uuid
+  entityType    String
+  entityId      String
+  eventType     SettlementAuditEventType
+  actorId       String?                  @db.Uuid
+  correlationId String?
+  reason        String?
+  metadata      Json?
+  createdAt     DateTime                 @default(now())
+
+  actor Admin? @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("settlement_audit_events")
+}
+
+// Legacy balances are retained for reconciliation only; the new ledger does
+// not infer opening balances from these fields.
 model MerchantLedger {
   id               String   @id @default(uuid()) @db.Uuid
   merchantId       String   @unique @db.Uuid

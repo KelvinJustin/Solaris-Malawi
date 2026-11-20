@@ -12,8 +12,9 @@ import { TransactionsService } from './transactions.service.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
+import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
 
-@UseGuards(JwtAuthGuard)
+@UseGuards(ArcjetGuard, JwtAuthGuard)
 @Controller('transactions')
 export class TransactionsController {
   constructor(

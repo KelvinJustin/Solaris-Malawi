@@ -12,10 +12,12 @@ import {
   AccountStatus,
   CheckoutSessionStatus,
   PaymentStatus,
+  FeeType,
 } from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
 import { PaymentProviderRegistry } from '../payment-providers/registry/payment-provider.registry.js';
 import { CheckoutTokenService } from './checkout-token.service.js';
+import { FeePolicyService } from '../ledger/fee-policy.service.js';
 import { TransactionsService } from './transactions.service.js';
 
 describe('TransactionsService', () => {
@@ -43,6 +45,9 @@ describe('TransactionsService', () => {
   };
 
   const transactionClient = {
+    feePolicy: {
+      findFirst: vi.fn(),
+    },
     paymentTransaction: {
       create: vi.fn(),
     },
@@ -59,6 +64,19 @@ describe('TransactionsService', () => {
     vi.clearAllMocks();
 
     databaseService.$transaction.mockImplementation(async (callback) => callback(transactionClient));
+    transactionClient.feePolicy.findFirst.mockImplementation(({ where }) =>
+      where.merchantId === null
+        ? {
+            id: 'fee-policy-zero',
+            merchantId: null,
+            type: FeeType.ZERO,
+            percentageBps: 0,
+            fixedAmountTambala: 0n,
+            currency: 'MWK',
+            version: 1,
+          }
+        : null,
+    );
 
     configService.get.mockImplementation((key: string) => {
       if (key === 'CHECKOUT_BASE_URL') {
@@ -79,6 +97,7 @@ describe('TransactionsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TransactionsService,
+        FeePolicyService,
         {
           provide: DatabaseService,
           useValue: databaseService,
@@ -159,6 +178,13 @@ describe('TransactionsService', () => {
         merchantReference: 'order-42',
         idempotencyKey: 'idem-key',
         status: PaymentStatus.CREATED,
+        feeTambala: 0n,
+        merchantNetTambala: 2500n,
+        feeType: FeeType.ZERO,
+        feePercentageBps: 0,
+        feeFixedTambala: 0n,
+        feePolicyId: 'fee-policy-zero',
+        feePolicyVersion: 1,
       }),
     });
 
@@ -293,6 +319,39 @@ describe('TransactionsService', () => {
         data: { status: CheckoutSessionStatus.EXPIRED },
       }),
     );
+  });
+
+  it('returns only public transaction fields for the owning merchant', async () => {
+    const transaction = {
+      publicReference: 'sp_123',
+      amountTambala: 2500,
+      currency: 'MWK',
+      status: PaymentStatus.SUCCEEDED,
+      provider: 'TEST',
+      description: 'Coffee order',
+      merchantReference: 'order-42',
+      createdAt: new Date('2025-01-01T00:00:00.000Z'),
+      processedAt: new Date('2025-01-01T00:01:00.000Z'),
+    };
+    databaseService.paymentTransaction.findFirst.mockResolvedValue(transaction);
+
+    await expect(service.findOne('merchant-123', 'sp_123')).resolves.toEqual(
+      transaction,
+    );
+    expect(databaseService.paymentTransaction.findFirst).toHaveBeenCalledWith({
+      where: { publicReference: 'sp_123', merchantId: 'merchant-123' },
+      select: {
+        publicReference: true,
+        amountTambala: true,
+        currency: true,
+        status: true,
+        provider: true,
+        description: true,
+        merchantReference: true,
+        createdAt: true,
+        processedAt: true,
+      },
+    });
   });
 
   it('throws when a merchant asks for a missing transaction by public reference', async () => {
