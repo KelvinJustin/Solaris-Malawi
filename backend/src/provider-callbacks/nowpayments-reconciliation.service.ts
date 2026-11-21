@@ -75,6 +75,7 @@ export class NowPaymentsReconciliationService
       const staleBefore = new Date(Date.now() - STALE_PAYMENT_AGE_MS);
       const candidates = await this.database.cryptoPaymentDetail.findMany({
         where: {
+          nowpaymentsPaymentId: { not: null },
           updatedAt: { lte: staleBefore },
           OR: [
             { lastReportedStatus: null },
@@ -109,13 +110,17 @@ export class NowPaymentsReconciliationService
       });
 
       for (const candidate of candidates) {
+        const paymentId = candidate.nowpaymentsPaymentId;
+        if (!paymentId) {
+          continue;
+        }
         try {
           const response = await this.nowPaymentsApiClient.getPaymentStatus(
-            candidate.nowpaymentsPaymentId,
+            paymentId,
           );
           if (
             !isNowPaymentsIpnPayload(response) ||
-            response.payment_id !== candidate.nowpaymentsPaymentId
+            response.payment_id !== paymentId
           ) {
             throw new Error(
               'NOWPayments status response did not match the requested payment.',
@@ -127,7 +132,7 @@ export class NowPaymentsReconciliationService
           );
         } catch (error) {
           this.logger.error(
-            `Could not reconcile NOWPayments payment ${candidate.nowpaymentsPaymentId}: ${this.describeError(error)}`,
+            `Could not reconcile NOWPayments payment ${paymentId}: ${this.describeError(error)}`,
             error,
           );
         } finally {
@@ -138,7 +143,7 @@ export class NowPaymentsReconciliationService
             });
           } catch (error) {
             this.logger.error(
-              `Could not update reconciliation time for NOWPayments payment ${candidate.nowpaymentsPaymentId}: ${this.describeError(error)}`,
+              `Could not update reconciliation time for NOWPayments payment ${paymentId}: ${this.describeError(error)}`,
               error,
             );
           }

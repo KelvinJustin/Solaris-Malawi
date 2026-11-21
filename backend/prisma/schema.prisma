@@ -104,6 +104,11 @@ enum PaymentProvider {
   NOWPAYMENTS
 }
 
+enum PaymentType {
+  MWK
+  CRYPTO
+}
+
 // Tracks the granular status of an individual payment gateway attempt.
 enum PaymentAttemptStatus {
   STARTED
@@ -254,29 +259,20 @@ model Merchant {
   @@map("merchants")
 }
 
-// Amounts are stored in integer tambala (1 MWK = 100 tambala).
-// Successful confirmation posts a provider receivable and pending merchant payable; cash settlement is separate.
+// Shared identity and lifecycle. Denomination-specific financial data lives in
+// exactly one of MwkPaymentDetail or CryptoPaymentDetail.
 model PaymentTransaction {
-  id                 String           @id @default(uuid()) @db.Uuid
-  publicReference    String           @unique // Solaris-generated; never expose the DB id externally.
-  merchantId         String           @db.Uuid
-  // Amount stored in the smallest MWK unit: 100 tambala = MWK 1.00.
-  amountTambala      Int              @map("amount")
-  currency           String           @default("MWK")
-  feeTambala         BigInt           @default(0)
-  merchantNetTambala BigInt
-  feeType            FeeType          @default(ZERO)
-  feePercentageBps   Int              @default(0)
-  feeFixedTambala    BigInt           @default(0)
-  feePolicyId        String           @db.Uuid
-  feePolicyVersion   Int
-  status             PaymentStatus    @default(CREATED)
-  provider           PaymentProvider? // Null until a provider is selected.
-  providerReference  String?
-  customerPhone      String?
-  description        String?
-  merchantReference  String?
-  idempotencyKey     String // Deduplicates retried requests; scoped per merchant.
+  id              String      @id @default(uuid()) @db.Uuid
+  publicReference String      @unique // Solaris-generated; never expose the DB id externally.
+  merchantId      String      @db.Uuid
+  paymentType     PaymentType @default(MWK)
+  status          PaymentStatus @default(CREATED)
+  provider        PaymentProvider?
+  providerReference String?
+  customerPhone   String?
+  description     String?
+  merchantReference String?
+  idempotencyKey  String // Deduplicates retried requests; scoped per merchant.
 
   // Sanitised diagnostics only — never store credentials or tokens here.
   failureCode    String?
@@ -286,10 +282,12 @@ model PaymentTransaction {
   updatedAt   DateTime  @updatedAt
   processedAt DateTime?
 
-  merchant         Merchant                 @relation(fields: [merchantId], references: [id], onDelete: Restrict)
+  merchant         Merchant             @relation(fields: [merchantId], references: [id], onDelete: Restrict)
   attempts         PaymentAttempt[]
   checkoutSessions CheckoutSession[]
-  feePolicy        FeePolicy                @relation(fields: [feePolicyId], references: [id], onDelete: Restrict)
+  mwkDetail        MwkPaymentDetail?
+  cryptoDetail     CryptoPaymentDetail?
+  legacyMwkSnapshot LegacyMwkPaymentSnapshot?
   settlementItems  ProviderSettlementItem[]
 
   @@unique([merchantId, idempotencyKey])
@@ -298,6 +296,28 @@ model PaymentTransaction {
   @@index([status, createdAt])
   @@index([merchantId, merchantReference])
   @@map("payment_transactions")
+}
+
+// Amounts and fee snapshots for MWK payments; 100 tambala = MWK 1.00.
+model MwkPaymentDetail {
+  transactionId     String   @id @db.Uuid
+  amountTambala     Int      @map("amount")
+  currency          String   @default("MWK")
+  feeTambala        BigInt   @default(0)
+  merchantNetTambala BigInt
+  feeType           FeeType  @default(ZERO)
+  feePercentageBps  Int      @default(0)
+  feeFixedTambala   BigInt   @default(0)
+  feePolicyId       String   @db.Uuid
+  feePolicyVersion  Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  transaction PaymentTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  feePolicy   FeePolicy          @relation(fields: [feePolicyId], references: [id], onDelete: Restrict)
+
+  @@index([feePolicyId])
+  @@map("mwk_payment_details")
 }
 
 // One row per provider call. Attempts are never overwritten so the full
@@ -507,7 +527,8 @@ model FeePolicy {
   createdAt          DateTime @default(now())
 
   merchant    Merchant?             @relation(fields: [merchantId], references: [id], onDelete: Restrict)
-  payments    PaymentTransaction[]
+  payments    MwkPaymentDetail[]
+  legacyMwkSnapshots LegacyMwkPaymentSnapshot[]
   auditEvents FeePolicyAuditEvent[]
 
   @@index([merchantId, currency, active])
@@ -525,6 +546,28 @@ model FeePolicyAuditEvent {
 
   @@index([policyId, occurredAt])
   @@map("fee_policy_audit_events")
+}
+
+// Preserves the pre-cutover MWK invoice snapshot for historical NOWPayments
+// transactions, whose payment amount was derived from an MWK amount.
+model LegacyMwkPaymentSnapshot {
+  transactionId      String   @id @db.Uuid
+  amountTambala      Int      @map("amount")
+  currency           String
+  feeTambala         BigInt
+  merchantNetTambala BigInt
+  feeType            FeeType
+  feePercentageBps   Int
+  feeFixedTambala    BigInt
+  feePolicyId        String   @db.Uuid
+  feePolicyVersion   Int
+  archivedAt         DateTime @default(now())
+
+  transaction PaymentTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  feePolicy   FeePolicy          @relation(fields: [feePolicyId], references: [id], onDelete: Restrict)
+
+  @@index([feePolicyId])
+  @@map("legacy_mwk_payment_snapshots")
 }
 
 model LedgerAccount {
@@ -849,32 +892,33 @@ model MerchantDocumentUpload {
   @@map("merchant_document_uploads")
 }
 
-// One row per crypto-paying PaymentAttempt. A side table, not new nullable
-// columns on PaymentAttempt — crypto needs a cluster of fields (pay address,
-// FX rate used, underpayment tracking) that mean nothing for mobile money,
-// and bolting them onto the shared table just gives you a payments table
-// that's half NULL depending on provider.
+// One row per crypto transaction. Merchant-specified terms exist before a
+// provider attempt; provider facts are filled by initiation/callback flows.
 model CryptoPaymentDetail {
-  id        String @id @default(uuid()) @db.Uuid
-  attemptId String @unique @db.Uuid
+  id            String  @id @default(uuid()) @db.Uuid
+  transactionId String  @unique @db.Uuid
+  attemptId     String? @unique @db.Uuid
 
-  // NOWPayments' own payment id. Join key for the IPN callback and for
-  // polling-based reconciliation; globally unique on their side.
-  nowpaymentsPaymentId String @unique
+  asset           String
+  network         String?
+  requestedAmount Decimal @db.Decimal(36, 18)
 
-  payCurrency String // NOWPayments ticker, e.g. "usdttrc20", "btc"
-  payAmount   Decimal @db.Decimal(36, 18)
+  // Provider-specific identifier resolved internally from asset + network.
+  providerCurrency String
+  nowpaymentsPaymentId String? @unique
+  payAmount          Decimal? @db.Decimal(36, 18)
+  paymentAddress     String?
 
-  // The fiat leg NOWPayments actually priced against — never MWK.
-  // Recorded so any settlement discrepancy traces back to "what rate,
-  // captured when".
-  priceCurrency            String
-  priceAmount              Decimal  @db.Decimal(20, 2)
-  fxRateMwkToPriceCurrency Decimal  @db.Decimal(20, 8)
-  fxRateCapturedAt         DateTime
+  // Provider-supplied quote metadata is reference-only. These legacy fields
+  // are nullable so old records can be retained without populating new ones.
+  priceCurrency            String?
+  priceAmount              Decimal? @db.Decimal(36, 18)
+  fxRateMwkToPriceCurrency Decimal? @db.Decimal(20, 8)
+  fxRateCapturedAt         DateTime?
 
-  paymentAddress String
-  network        String? // display-only breakdown of payCurrency, e.g. "TRC20"
+  actuallyPaidAmount Decimal? @db.Decimal(36, 18)
+  feeAmount          Decimal? @db.Decimal(36, 18)
+  merchantNetAmount  Decimal? @db.Decimal(36, 18)
 
   // Mirrors NOWPayments' payment_status string verbatim (waiting, confirming,
   // confirmed, sending, partially_paid, finished, failed, expired, refunded).
@@ -882,16 +926,17 @@ model CryptoPaymentDetail {
   // ProviderSettlementItem.reportedStatus — so a new NOWPayments status
   // doesn't require a migration.
   lastReportedStatus String?
-  actuallyPaidAmount Decimal? @db.Decimal(36, 18)
 
   invoiceExpiresAt DateTime?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  attempt   PaymentAttempt          @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+  transaction PaymentTransaction    @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  attempt     PaymentAttempt?        @relation(fields: [attemptId], references: [id], onDelete: Restrict)
   ipnEvents CryptoPaymentIpnEvent[]
 
   @@index([lastReportedStatus])
+  @@index([asset, network])
   @@map("crypto_payment_details")
 }
 

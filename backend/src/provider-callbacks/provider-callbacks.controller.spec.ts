@@ -1,14 +1,9 @@
-import {
-  BadRequestException,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Test, type TestingModule } from '@nestjs/testing';
 
-import {
-  ProviderCallbacksController,
-} from './provider-callbacks.controller.js';
+import { ProviderCallbacksController } from './provider-callbacks.controller.js';
 import { ProviderCallbacksService } from './provider-callbacks.service.js';
 
 describe('ProviderCallbacksController', () => {
@@ -35,7 +30,9 @@ describe('ProviderCallbacksController', () => {
       ],
     }).compile();
 
-    controller = module.get<ProviderCallbacksController>(ProviderCallbacksController);
+    controller = module.get<ProviderCallbacksController>(
+      ProviderCallbacksController,
+    );
   });
 
   afterEach(() => {
@@ -69,12 +66,7 @@ describe('ProviderCallbacksController', () => {
     providerCallbacksService.handleCallback.mockResolvedValue(result);
 
     await expect(
-      controller.handleCallback(
-        body,
-        request,
-        '1736182800123',
-        'aabbccddeeff',
-      ),
+      controller.handleCallback(body, request, '1736182800123', 'aabbccddeeff'),
     ).resolves.toEqual(result);
 
     expect(providerCallbacksService.handleCallback).toHaveBeenCalledWith({
@@ -99,7 +91,12 @@ describe('ProviderCallbacksController', () => {
     } as any;
 
     await expect(
-      controller.handleCallback(body, {} as any, '1736182800123', 'aabbccddeeff'),
+      controller.handleCallback(
+        body,
+        {} as any,
+        '1736182800123',
+        'aabbccddeeff',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(providerCallbacksService.handleCallback).not.toHaveBeenCalled();
@@ -115,20 +112,31 @@ describe('ProviderCallbacksController', () => {
       .update(JSON.stringify(body))
       .digest('hex');
     const result = { received: true, duplicate: false };
-    providerCallbacksService.handleNowPaymentsCallback.mockResolvedValue(result);
+    providerCallbacksService.handleNowPaymentsCallback.mockResolvedValue(
+      result,
+    );
 
+    const request = { rawBody: Buffer.from(JSON.stringify(body)) } as any;
     await expect(
-      controller.handleNowPaymentsCallback(body, signature),
+      controller.handleNowPaymentsCallback(body, request, signature),
     ).resolves.toEqual(result);
     expect(
       providerCallbacksService.handleNowPaymentsCallback,
-    ).toHaveBeenCalledWith(body);
+    ).toHaveBeenCalledWith({
+      ...body,
+      actually_paid: '0.00012',
+    });
   });
 
   it('rejects a NOWPayments IPN with an invalid signature', async () => {
     await expect(
       controller.handleNowPaymentsCallback(
         { payment_id: 'np-payment-1', payment_status: 'finished' },
+        {
+          rawBody: Buffer.from(
+            '{"payment_id":"np-payment-1","payment_status":"finished"}',
+          ),
+        } as any,
         'invalid',
       ),
     ).rejects.toBeInstanceOf(UnauthorizedException);

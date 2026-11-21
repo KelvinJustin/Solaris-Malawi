@@ -45,17 +45,17 @@ export class TestProviderAdapter implements PaymentProviderAdapter {
             );
         }
 
-        const amountKwacha = Number(
-            (input.amountTambala / 100).toFixed(2),
-        );
-
-        let response: Response;
-
         if (!('phoneNumber' in input)) {
             throw new Error(
                 'The test provider requires a mobile-money phone number.',
             );
         }
+
+        const amountKwacha = Number(
+            (input.amountTambala / 100).toFixed(2),
+        );
+
+        let response: Response;
 
         try {
             response = await fetch(`${baseUrl}/initiate`, {

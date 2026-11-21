@@ -1,4 +1,8 @@
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+} from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '../generated/prisma/client.js';
 import type { Prisma as PrismaTypes } from '../generated/prisma/client.js';
@@ -10,15 +14,15 @@ import {
   LedgerTransactionStatus,
   PaymentProvider,
 } from '../generated/prisma/enums.js';
-import { parseNowPaymentsCurrency } from './crypto-asset.util.js';
 
 interface SuccessfulCryptoPaymentPosting {
-  paymentId: string; // the PaymentTransaction id — kept for cross-reference with the MWK-side transaction record, even though no MWK posting happens
+  paymentId: string; // The shared lifecycle transaction ID; crypto financial details remain asset-denominated.
   publicReference: string;
   merchantId: string;
   provider: PaymentProvider;
-  payCurrency: string; // raw NOWPayments ticker, e.g. "usdttrc20"
-  actuallyPaidAmount: PrismaTypes.Decimal | string | number;
+  asset: string;
+  network: string | null;
+  actuallyPaidAmount: PrismaTypes.Decimal | string;
   feeBps: number;
 }
 
@@ -47,6 +51,18 @@ export class CryptoLedgerPostingService {
       throw new InternalServerErrorException('feeBps must be in [0, 10000).');
     }
 
+    const feeAmount = actuallyPaid
+      .mul(payment.feeBps)
+      .div(10_000)
+      .toDecimalPlaces(18);
+    const merchantNetAmount = actuallyPaid.sub(feeAmount);
+
+    if (merchantNetAmount.lte(0)) {
+      throw new InternalServerErrorException(
+        'Computed merchant net crypto amount is non-positive.',
+      );
+    }
+
     const existing = await tx.cryptoLedgerTransaction.findUnique({
       where: {
         sourceType_sourceId_postingPurpose: {
@@ -63,22 +79,10 @@ export class CryptoLedgerPostingService {
           'Existing crypto payment ledger posting is not posted',
         );
       }
-      return existing; // idempotent — a replayed/duplicate IPN hits this and returns the original posting
+      return { ledgerTransaction: existing, feeAmount, merchantNetAmount };
     }
 
-    const { asset, network } = parseNowPaymentsCurrency(payment.payCurrency);
-
-    const feeAmount = actuallyPaid
-      .mul(payment.feeBps)
-      .div(10_000)
-      .toDecimalPlaces(18);
-    const merchantNetAmount = actuallyPaid.sub(feeAmount);
-
-    if (merchantNetAmount.lte(0)) {
-      throw new InternalServerErrorException(
-        'Computed merchant net crypto amount is non-positive.',
-      );
-    }
+    const { asset, network } = payment;
 
     const providerClearingAccount = await this.ensureAccount(tx, {
       key: `crypto-provider-clearing:${payment.provider}:${asset}:${network ?? 'NONE'}`,
@@ -103,8 +107,16 @@ export class CryptoLedgerPostingService {
     });
 
     const entries: CryptoPostingEntry[] = [
-      { accountId: providerClearingAccount.id, direction: LedgerEntryDirection.DEBIT, amount: actuallyPaid },
-      { accountId: merchantAccount.id, direction: LedgerEntryDirection.CREDIT, amount: merchantNetAmount },
+      {
+        accountId: providerClearingAccount.id,
+        direction: LedgerEntryDirection.DEBIT,
+        amount: actuallyPaid,
+      },
+      {
+        accountId: merchantAccount.id,
+        direction: LedgerEntryDirection.CREDIT,
+        amount: merchantNetAmount,
+      },
     ];
 
     if (feeAmount.gt(0)) {
@@ -117,10 +129,14 @@ export class CryptoLedgerPostingService {
         asset,
         network,
       });
-      entries.push({ accountId: feeAccount.id, direction: LedgerEntryDirection.CREDIT, amount: feeAmount });
+      entries.push({
+        accountId: feeAccount.id,
+        direction: LedgerEntryDirection.CREDIT,
+        amount: feeAmount,
+      });
     }
 
-    return this.postEntries(tx, {
+    const ledgerTransaction = await this.postEntries(tx, {
       sourceType: 'CRYPTO_PAYMENT',
       sourceId: payment.paymentId,
       postingPurpose: 'SUCCESS',
@@ -128,6 +144,7 @@ export class CryptoLedgerPostingService {
       provenance: 'CALLBACK',
       entries,
     });
+    return { ledgerTransaction, feeAmount, merchantNetAmount };
   }
 
   private async postEntries(
@@ -169,12 +186,22 @@ export class CryptoLedgerPostingService {
         where: { accountId: entry.accountId },
         create: {
           accountId: entry.accountId,
-          debitTotal: entry.direction === LedgerEntryDirection.DEBIT ? entry.amount : 0,
-          creditTotal: entry.direction === LedgerEntryDirection.CREDIT ? entry.amount : 0,
+          debitTotal:
+            entry.direction === LedgerEntryDirection.DEBIT ? entry.amount : 0,
+          creditTotal:
+            entry.direction === LedgerEntryDirection.CREDIT ? entry.amount : 0,
         },
         update: {
-          debitTotal: { increment: entry.direction === LedgerEntryDirection.DEBIT ? entry.amount : 0 },
-          creditTotal: { increment: entry.direction === LedgerEntryDirection.CREDIT ? entry.amount : 0 },
+          debitTotal: {
+            increment:
+              entry.direction === LedgerEntryDirection.DEBIT ? entry.amount : 0,
+          },
+          creditTotal: {
+            increment:
+              entry.direction === LedgerEntryDirection.CREDIT
+                ? entry.amount
+                : 0,
+          },
         },
       });
     }
@@ -217,7 +244,9 @@ export class CryptoLedgerPostingService {
     });
 
     if (account.status !== LedgerAccountStatus.ACTIVE) {
-      throw new InternalServerErrorException(`Crypto ledger account ${input.key} is not active.`);
+      throw new InternalServerErrorException(
+        `Crypto ledger account ${input.key} is not active.`,
+      );
     }
     if (
       account.code !== input.code ||
@@ -226,7 +255,9 @@ export class CryptoLedgerPostingService {
       account.asset !== input.asset ||
       account.network !== input.network
     ) {
-      throw new InternalServerErrorException(`Crypto ledger account mapping for ${input.key} is inconsistent.`);
+      throw new InternalServerErrorException(
+        `Crypto ledger account mapping for ${input.key} is inconsistent.`,
+      );
     }
 
     return account;
@@ -234,7 +265,9 @@ export class CryptoLedgerPostingService {
 
   private assertBalanced(entries: CryptoPostingEntry[]): void {
     if (entries.length < 2 || entries.some((e) => e.amount.lte(0))) {
-      throw new InternalServerErrorException('Crypto ledger entries must have positive amounts.');
+      throw new InternalServerErrorException(
+        'Crypto ledger entries must have positive amounts.',
+      );
     }
     const debitTotal = entries
       .filter((e) => e.direction === LedgerEntryDirection.DEBIT)
@@ -244,7 +277,9 @@ export class CryptoLedgerPostingService {
       .reduce((sum, e) => sum.add(e.amount), new Prisma.Decimal(0));
 
     if (!debitTotal.equals(creditTotal)) {
-      throw new InternalServerErrorException('Crypto ledger transaction is not balanced.');
+      throw new InternalServerErrorException(
+        'Crypto ledger transaction is not balanced.',
+      );
     }
   }
 }

@@ -8,8 +8,6 @@ import { DatabaseService } from '../database/database.service.js';
 import { TestProviderAdapter } from './adapters/test-provider.adapter.js';
 import { NowPaymentsApiClient } from './adapters/nowpayments/nowpayments-api.client.js';
 import { NowPaymentsProviderAdapter } from './adapters/nowpayments/nowpayments-payment-provider.adapter.js';
-import { FX_RATE_PROVIDER, LiveFxRateProvider } from '../fx/fx-rate.provider.js';
-import type { FxRateProvider } from '../fx/fx-rate.provider.js';
 
 import {
   PAYMENT_PROVIDER_ADAPTERS,
@@ -21,8 +19,6 @@ import {
   providers: [
     NowPaymentsApiClient,
 
-    { provide: FX_RATE_PROVIDER, useClass: LiveFxRateProvider },
-
     {
       provide: TestProviderAdapter,
       inject: [ConfigService],
@@ -32,18 +28,16 @@ import {
 
     {
       provide: NowPaymentsProviderAdapter,
-      inject: [NowPaymentsApiClient, ConfigService, DatabaseService, FX_RATE_PROVIDER],
+      inject: [NowPaymentsApiClient, ConfigService, DatabaseService],
       useFactory: (
         client: NowPaymentsApiClient,
         configService: ConfigService,
         databaseService: DatabaseService,
-        fxRateProvider: FxRateProvider,
       ) =>
         new NowPaymentsProviderAdapter(
           client,
           configService,
           databaseService,
-          fxRateProvider,
           PaymentProvider.NOWPAYMENTS,
         ),
     },

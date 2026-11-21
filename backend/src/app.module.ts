@@ -16,14 +16,13 @@ import { PaymentProvidersModule } from './payment-providers/payment-providers.mo
 import { ProviderCallbacksModule } from './provider-callbacks/provider-callbacks.module.js';
 import { StorageModule } from './storage/storage.module.js';
 import { SettlementsModule } from './settlements/settlements.module.js';
-import fxConfig from './config/fx.config.js';
 import nowpaymentsConfig from './config/nowpayments.config.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [fxConfig, nowpaymentsConfig],
+      load: [nowpaymentsConfig],
     }),
     LoggerModule.forRootAsync({
       imports: [ConfigModule],

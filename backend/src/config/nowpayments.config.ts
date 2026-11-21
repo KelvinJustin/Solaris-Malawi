@@ -48,10 +48,6 @@ export default registerAs('nowpayments', () => {
     ipnSecret,
     baseUrl,
     publicApiBaseUrl,
-    // NOWPayments doesn't support MWK as price_currency. We always quote
-    // against this currency and persist the FX rate used — see fx-rate.provider.ts.
-    settlementPriceCurrency: (process.env.NOWPAYMENTS_PRICE_CURRENCY?.trim() || 'usd').toLowerCase(),
-    maxFxQuoteAgeSeconds: Number(process.env.NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS ?? 300),
     cryptoFeeBps,
   };
 });

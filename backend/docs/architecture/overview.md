@@ -22,7 +22,6 @@ Solaris API (/v1)
         ├── transactions
         ├── payment-providers
         │   └── adapters/nowpayments
-        ├── fx
         ├── config
         ├── provider-callbacks
         ├── settlements
@@ -68,14 +67,14 @@ The `auth/admin-auth` and `admin` modules handle:
 
 ### Payment domain
 
-The `transactions`, `checkout`, `payment-providers`, `provider-callbacks`, `fx`, `ledger`, and `settlements` modules implement:
+The `transactions`, `checkout`, `payment-providers`, `provider-callbacks`, `ledger`, and `settlements` modules implement:
 
 - payment transaction creation and lookup
 - hosted checkout sessions
 - idempotent transaction creation boundaries
 - provider adapter registration with a test adapter and NOWPayments adapter
 - signed provider callbacks and NOWPayments IPNs with guarded payment-state transitions
-- MWK-to-price-currency conversion for crypto invoice creation
+- crypto-native payment amounts and ledger postings, with a provider-only USD reference estimate for NOWPayments invoice creation
 - immutable double-entry payment postings and fee snapshots in `ledger`
 - provider-neutral statement import, matching, allocation, approval, and posting in `settlements`
 
@@ -91,7 +90,7 @@ The provider layer is implemented through a registry and adapter contract:
 
 The registry currently exposes `TEST` and `NOWPAYMENTS` adapters. The common adapter contract allows other providers to be added without changing the transaction service contract. Airtel Money and TNM Mpamba adapters are not implemented.
 
-The NOWPayments adapter creates a provider payment for the configured price currency, persists crypto payment details and the FX quote snapshot, and returns address/amount instructions to checkout. Its IPN endpoint is `/v1/provider-callbacks/nowpayments`; the `x-nowpayments-sig` signature is verified before processing. A `finished` status transitions the attempt/transaction and posts the crypto ledger capture in the same Prisma transaction. Partial payments enter pending reconciliation. Refund IPNs received after success are retained for manual handling and do not automatically change the successful state or reverse the ledger. See [nowpaymentsAdapter.md](./nowpaymentsAdapter.md) for configuration and readiness details.
+The NOWPayments adapter sends the merchant's exact crypto amount as `pay_amount`. Because NOWPayments requires a fiat `price_amount` even when `pay_amount` is set, the adapter obtains a USD reference estimate; that reference does not change the transaction denomination or ledger credit. The adapter persists crypto payment details and returns address/amount instructions to checkout. Its IPN endpoint is `/v1/provider-callbacks/nowpayments`; the `x-nowpayments-sig` signature is verified before processing. A `finished` status transitions the attempt/transaction and posts the crypto ledger capture in the same Prisma transaction. Partial payments enter pending reconciliation. Refund IPNs received after success are retained for manual handling and do not automatically change the successful state or reverse the ledger. See [nowpaymentsIntegration.md](./nowpaymentsIntegration.md) for API usage and configuration.
 
 ### Settlement reconciliation
 
@@ -110,7 +109,7 @@ This protects the payment state from race conditions and duplicate callback payl
 
 ## 5. Ledger and financial cutover
 
-The `ledger` module is called by payment creation and successful callback processing. Fee policies are resolved and snapshotted when a payment is created; only a valid successful callback creates a payment posting. The callback's payment, attempt, entries, ledger transaction, and balance projections commit or roll back together.
+The `ledger` module is called by MWK payment creation and successful callback processing. MWK fee policies are resolved and snapshotted when an MWK payment is created; crypto payments use their separate crypto fee setting and native-asset ledger. Only a valid successful callback creates a payment posting. The callback's payment, attempt, entries, ledger transaction, and balance projections commit or roll back together.
 
 The V1 posting debits provider clearing and credits merchant pending settlement plus nonzero platform fee revenue. Provider clearing is a receivable, not proof of cash settlement. Historical backfill is controlled and dry-run by default. The legacy `MerchantLedger` is retained for reconciliation and is not imported as an opening balance. See [ledgerModule.md](./ledgerModule.md) for the account model, operational commands, backfill rules, and cutover limitations.
 
@@ -139,7 +138,7 @@ The current repository does not yet implement:
 - durable asynchronous worker infrastructure for unrelated retries and webhook delivery
 - production deployment hardening or multi-service operations
 
-NOWPayments FX quotes are cached in process memory. The default upstream (`open.er-api.com`) publishes daily, although the configured poll interval defaults to 15 seconds. The adapter's maximum quote age measures local fetch time and does not verify upstream publication age; this must be resolved before treating the quote as production-fresh.
+NOWPayments requires a fiat `price_amount`; the adapter obtains a USD reference estimate from the provider and supplies the exact crypto input separately as `pay_amount`. This reference is not an MWK conversion and does not determine the crypto ledger credit. Live provider sandbox/production behavior and public IPN delivery still need operational validation.
 
 The architecture is therefore current and valid for the implemented code, but it is not a complete production payment platform design document.
 

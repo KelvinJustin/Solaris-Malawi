@@ -10,6 +10,7 @@ import {
   PaymentAttemptStatus,
   PaymentProvider,
   PaymentStatus,
+  PaymentType,
 } from '../generated/prisma/enums.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { DatabaseService } from '../database/database.service.js';
@@ -80,7 +81,9 @@ export class ProviderCallbacksService {
       // attemptReference is the PaymentAttempt UUID sent to the simulator.
       const attempt = await tx.paymentAttempt.findUnique({
         where: { id: body.attemptReference },
-        include: { transaction: true },
+        include: {
+          transaction: { include: { mwkDetail: true } },
+        },
       });
 
       if (!attempt) {
@@ -101,8 +104,10 @@ export class ProviderCallbacksService {
       }
 
       if (
-        transaction.amountTambala !== Math.round(amountInTambala) ||
-        transaction.currency !== body.currency ||
+        transaction.paymentType !== PaymentType.MWK ||
+        !transaction.mwkDetail ||
+        transaction.mwkDetail.amountTambala !== Math.round(amountInTambala) ||
+        transaction.mwkDetail.currency !== body.currency ||
         body.currency !== 'MWK'
       ) {
         throw new ConflictException(
@@ -247,7 +252,8 @@ export class ProviderCallbacksService {
       }
 
       if (expectedStatus === PaymentStatus.SUCCEEDED) {
-        if (!transaction.provider || transaction.merchantNetTambala === null) {
+        const detail = transaction.mwkDetail;
+        if (!transaction.provider || !detail) {
           throw new InternalServerErrorException(
             'Successful payment is missing its immutable ledger snapshot',
           );
@@ -258,10 +264,10 @@ export class ProviderCallbacksService {
           publicReference: transaction.publicReference,
           merchantId: transaction.merchantId,
           provider: transaction.provider,
-          amountTambala: BigInt(transaction.amountTambala),
-          feeTambala: transaction.feeTambala,
-          merchantNetTambala: transaction.merchantNetTambala,
-          currency: transaction.currency,
+          amountTambala: BigInt(detail.amountTambala),
+          feeTambala: detail.feeTambala,
+          merchantNetTambala: detail.merchantNetTambala,
+          currency: detail.currency,
           source: 'CALLBACK',
         });
       }
@@ -345,13 +351,9 @@ export class ProviderCallbacksService {
    * land in PENDING_RECONCILIATION, same as applyInitiationResult's UNKNOWN
    * outcome does today, just reached by a different path.
    *
-   * Also note what CANNOT be cross-checked here that handleCallback() does
-   * check for mobile money: NOWPayments never reports an MWK amount (it only
-   * knows its own price_currency/pay_currency), so there is no amount/currency
-   * binding check possible against the stored MWK transaction. The binding
-   * that IS possible — and is enforced below — is: the nowpaymentsPaymentId
-   * must match the one we stored at invoice creation, and the resolved
-   * transaction's provider must actually be NOWPAYMENTS.
+   * The binding enforced here is the stored nowpaymentsPaymentId and the
+   * transaction's crypto type/provider. The amount credited is NOWPayments'
+   * actually_paid value, persisted in the transaction's asset/network.
    */
   async handleNowPaymentsCallback(payload: NowPaymentsIpnPayload) {
     const detail = await this.database.cryptoPaymentDetail.findUnique({
@@ -382,7 +384,7 @@ export class ProviderCallbacksService {
   private async applyNowPaymentsStatus(payload: NowPaymentsIpnPayload) {
     const detail = await this.database.cryptoPaymentDetail.findUnique({
       where: { nowpaymentsPaymentId: payload.payment_id },
-      include: { attempt: { include: { transaction: true } } },
+      include: { attempt: true, transaction: true },
     });
 
     if (!detail) {
@@ -394,7 +396,7 @@ export class ProviderCallbacksService {
     return this.database.$transaction(async (tx) => {
       const currentDetail = await tx.cryptoPaymentDetail.findUnique({
         where: { id: detail.id },
-        include: { attempt: { include: { transaction: true } } },
+        include: { attempt: true, transaction: true },
       });
 
       if (!currentDetail) {
@@ -402,11 +404,21 @@ export class ProviderCallbacksService {
       }
 
       const attempt = currentDetail.attempt;
-      const transaction = attempt.transaction;
+      if (!attempt) {
+        throw new ConflictException(
+          'NOWPayments payment detail is not linked to a payment attempt.',
+        );
+      }
+      const transaction = currentDetail.transaction;
 
       if (transaction.provider !== PaymentProvider.NOWPAYMENTS) {
         throw new ConflictException(
           'Callback does not match the stored payment provider',
+        );
+      }
+      if (transaction.paymentType !== PaymentType.CRYPTO) {
+        throw new ConflictException(
+          'NOWPayments callback does not match a crypto transaction.',
         );
       }
 
@@ -427,8 +439,8 @@ export class ProviderCallbacksService {
         if (
           transaction.status === PaymentStatus.SUCCEEDED &&
           payload.actually_paid !== undefined &&
-          currentDetail.actuallyPaidAmount?.toString() !==
-            String(payload.actually_paid)
+          (!currentDetail.actuallyPaidAmount ||
+            !currentDetail.actuallyPaidAmount.equals(payload.actually_paid))
         ) {
           throw new ConflictException(
             'Duplicate finished payment reported a different paid amount',
@@ -507,12 +519,6 @@ export class ProviderCallbacksService {
       await updateDetail();
 
       if (mapped.transactionStatus === PaymentStatus.SUCCEEDED) {
-        if (transaction.merchantNetTambala === null) {
-          throw new InternalServerErrorException(
-            'Successful payment is missing its immutable ledger snapshot',
-          );
-        }
-
         const actuallyPaidAmount =
           payload.actually_paid ?? currentDetail.actuallyPaidAmount;
         if (actuallyPaidAmount === null || actuallyPaidAmount === undefined) {
@@ -521,20 +527,30 @@ export class ProviderCallbacksService {
           );
         }
 
-        await this.cryptoLedgerPostingService.postSuccessfulCryptoPayment(
-          tx,
-          {
-            paymentId: transaction.id,
-            publicReference: transaction.publicReference,
-            merchantId: transaction.merchantId,
-            provider: PaymentProvider.NOWPAYMENTS,
-            payCurrency: currentDetail.payCurrency,
+        const posting =
+          await this.cryptoLedgerPostingService.postSuccessfulCryptoPayment(
+            tx,
+            {
+              paymentId: transaction.id,
+              publicReference: transaction.publicReference,
+              merchantId: transaction.merchantId,
+              provider: PaymentProvider.NOWPAYMENTS,
+              asset: currentDetail.asset,
+              network: currentDetail.network,
+              actuallyPaidAmount,
+              feeBps: this.configService.getOrThrow<number>(
+                'nowpayments.cryptoFeeBps',
+              ),
+            },
+          );
+        await tx.cryptoPaymentDetail.update({
+          where: { id: currentDetail.id },
+          data: {
             actuallyPaidAmount,
-            feeBps: this.configService.getOrThrow<number>(
-              'nowpayments.cryptoFeeBps',
-            ),
+            feeAmount: posting.feeAmount,
+            merchantNetAmount: posting.merchantNetAmount,
           },
-        );
+        });
       }
 
       return { received: true, duplicate: false };

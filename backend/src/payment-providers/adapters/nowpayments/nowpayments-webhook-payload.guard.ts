@@ -3,8 +3,8 @@ import type { NowPaymentsStatus } from './nowpayments-status.util.js';
 export interface NowPaymentsIpnPayload {
   payment_id: string;
   payment_status: NowPaymentsStatus;
-  actually_paid?: number;
-  pay_amount?: number;
+  actually_paid?: string;
+  pay_amount?: string;
   order_id?: string;
 }
 
@@ -31,13 +31,15 @@ export function isNowPaymentsIpnPayload(value: unknown): value is NowPaymentsIpn
     typeof record.payment_status === 'string' &&
     supportedStatuses.has(record.payment_status as NowPaymentsStatus) &&
     (record.actually_paid === undefined ||
-      (typeof record.actually_paid === 'number' &&
-        Number.isFinite(record.actually_paid) &&
-        record.actually_paid >= 0)) &&
+      (typeof record.actually_paid === 'string' &&
+        /^(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(
+          record.actually_paid,
+        ))) &&
     (record.pay_amount === undefined ||
-      (typeof record.pay_amount === 'number' &&
-        Number.isFinite(record.pay_amount) &&
-        record.pay_amount >= 0)) &&
+      (typeof record.pay_amount === 'string' &&
+        /^(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(
+          record.pay_amount,
+        ))) &&
     (record.order_id === undefined || typeof record.order_id === 'string')
   );
 }

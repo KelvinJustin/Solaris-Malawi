@@ -144,15 +144,15 @@ This is the security-critical callback suite. It covers:
 - mismatch between stored transaction/provider metadata and callback data
 - provider state transitions and payment transaction finalization logic
 
-### FX and NOWPayments
+### NOWPayments
 
-The NOWPayments tests are under `src/payment-providers/adapters/nowpayments/`; `src/fx/fx-rate.provider.spec.ts` covers FX quote caching and refresh behavior. They cover:
+The NOWPayments tests are under `src/payment-providers/adapters/nowpayments/`. They cover:
 
-- provider API request formatting and HTTP/network error handling
-- conversion and persistence of crypto payment instructions and the FX snapshot
-- rejection of stale local quotes and missing callback URL configuration
+- provider API request formatting, exact decimal transport, USD reference estimates, and HTTP/network error handling
+- persistence and response shaping for crypto payment instructions
+- missing callback URL configuration and provider amount mismatches
 - IPN signature verification and provider-to-internal status mapping
-- webhook state transitions, duplicate/finalized events, and ledger posting
+- webhook state transitions, duplicate/finalized events, and crypto ledger posting
 
 These are mocked unit tests. They do not contact NOWPayments or prove a live sandbox transaction or public IPN delivery.
 

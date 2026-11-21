@@ -8,6 +8,7 @@ import {
   PaymentAttemptStatus,
   PaymentProvider,
   PaymentStatus,
+  PaymentType,
 } from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
 import { CryptoLedgerPostingService } from '../ledger/crypto-ledger-posting.service.js';
@@ -124,10 +125,13 @@ describe('ProviderCallbacksService', () => {
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: null,
-        amountTambala: 2500,
-        feeTambala: 0n,
-        merchantNetTambala: 2500n,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: {
+          amountTambala: 2500,
+          feeTambala: 0n,
+          merchantNetTambala: 2500n,
+          currency: 'MWK',
+        },
         status: PaymentStatus.PROCESSING,
       },
     });
@@ -209,10 +213,13 @@ describe('ProviderCallbacksService', () => {
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: null,
-        amountTambala: 2500,
-        feeTambala: 0n,
-        merchantNetTambala: 2500n,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: {
+          amountTambala: 2500,
+          feeTambala: 0n,
+          merchantNetTambala: 2500n,
+          currency: 'MWK',
+        },
         status: PaymentStatus.PROCESSING,
       },
     });
@@ -253,8 +260,8 @@ describe('ProviderCallbacksService', () => {
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: 'provider-ref-1',
-        amountTambala: 2500,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: { amountTambala: 2500, currency: 'MWK' },
         status: PaymentStatus.SUCCEEDED,
       },
     });
@@ -297,10 +304,13 @@ describe('ProviderCallbacksService', () => {
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: null,
-        amountTambala: 2500,
-        feeTambala: 0n,
-        merchantNetTambala: 2500n,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: {
+          amountTambala: 2500,
+          feeTambala: 0n,
+          merchantNetTambala: 2500n,
+          currency: 'MWK',
+        },
         status: PaymentStatus.PROCESSING,
       },
     };
@@ -369,8 +379,8 @@ describe('ProviderCallbacksService', () => {
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: null,
-        amountTambala: 2500,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: { amountTambala: 2500, currency: 'MWK' },
         status: PaymentStatus.PROCESSING,
       },
     });
@@ -507,8 +517,8 @@ describe('ProviderCallbacksService', () => {
         publicReference: 'txn-123',
         provider: PaymentProvider.TEST,
         providerReference: null,
-        amountTambala: 2500,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: { amountTambala: 2500, currency: 'MWK' },
         status: PaymentStatus.PROCESSING,
       },
     });
@@ -526,26 +536,29 @@ describe('ProviderCallbacksService', () => {
   it('uses the configured NOWPayments fee and records the actual paid amount', async () => {
     const detail = {
       id: 'crypto-detail-1',
-      payCurrency: 'btc',
+      transactionId: 'crypto-transaction-1',
+      asset: 'BTC',
+      network: null,
+      providerCurrency: 'btc',
       actuallyPaidAmount: null,
       attempt: {
         id: 'crypto-attempt-1',
         status: PaymentAttemptStatus.PROCESSING,
         providerReference: 'np-payment-1',
-        transaction: {
-          id: 'crypto-transaction-1',
-          publicReference: 'crypto-ref-1',
-          merchantId: 'merchant-1',
-          provider: PaymentProvider.NOWPAYMENTS,
-          status: PaymentStatus.PROCESSING,
-          merchantNetTambala: 1_000_000n,
-        },
+      },
+      transaction: {
+        id: 'crypto-transaction-1',
+        publicReference: 'crypto-ref-1',
+        merchantId: 'merchant-1',
+        provider: PaymentProvider.NOWPAYMENTS,
+        paymentType: PaymentType.CRYPTO,
+        status: PaymentStatus.PROCESSING,
       },
     };
     const payload = {
       payment_id: 'np-payment-1',
       payment_status: 'finished' as const,
-      actually_paid: 0.00012,
+      actually_paid: '0.00012',
     };
     databaseService.cryptoPaymentDetail.findUnique.mockResolvedValue(detail);
     databaseService.cryptoPaymentIpnEvent.create.mockResolvedValue({});
@@ -553,7 +566,10 @@ describe('ProviderCallbacksService', () => {
     transactionClient.cryptoPaymentDetail.update.mockResolvedValue({});
     transactionClient.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
     transactionClient.paymentTransaction.updateMany.mockResolvedValue({ count: 1 });
-    cryptoLedgerPostingService.postSuccessfulCryptoPayment.mockResolvedValue({});
+    cryptoLedgerPostingService.postSuccessfulCryptoPayment.mockResolvedValue({
+      feeAmount: '0.000003',
+      merchantNetAmount: '0.000117',
+    });
 
     await expect(service.handleNowPaymentsCallback(payload)).resolves.toEqual({
       received: true,
@@ -564,7 +580,9 @@ describe('ProviderCallbacksService', () => {
       transactionClient,
       expect.objectContaining({
         paymentId: 'crypto-transaction-1',
-        actuallyPaidAmount: 0.00012,
+        asset: 'BTC',
+        network: null,
+        actuallyPaidAmount: '0.00012',
         feeBps: 250,
       }),
     );
@@ -572,8 +590,17 @@ describe('ProviderCallbacksService', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           lastReportedStatus: 'finished',
-          actuallyPaidAmount: 0.00012,
+          actuallyPaidAmount: '0.00012',
         }),
+      }),
+    );
+    expect(transactionClient.cryptoPaymentDetail.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: {
+          actuallyPaidAmount: '0.00012',
+          feeAmount: '0.000003',
+          merchantNetAmount: '0.000117',
+        },
       }),
     );
   });

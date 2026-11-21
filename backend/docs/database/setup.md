@@ -105,16 +105,22 @@ The existing schema includes models for:
 - `OtpChallenge`
 - `RevokedToken`
 - `AdminRevokedToken`
-- `PaymentTransaction`
+- `PaymentTransaction`, with shared payment identity and lifecycle state
+- `MwkPaymentDetail` and `CryptoPaymentDetail`, which keep payment terms in their native denomination
+- `LegacyMwkPaymentSnapshot`, which preserves the former MWK invoice/fee snapshot for historical transactions that already had crypto payment details
 - `PaymentAttempt`
 - `CheckoutSession`
 - `MerchantLedger` (legacy balances retained for reconciliation)
 - `FeePolicy` and `FeePolicyAuditEvent`
 - `LedgerAccount`, `LedgerTransaction`, `LedgerEntry`, and `LedgerAccountBalance`
-- Crypto payment details and IPN event history
+- NOWPayments IPN event history
 - Provider settlement batches/items, normalized imports, bank statement lines, allocations, approvals, and audit events
 
-The financial/payment part of the schema is active. Payment fees are snapshotted at creation, and successful verified provider events post to the ledger in the same database transaction as payment and attempt updates. Settlement reconciliation separately supports normalized imports and controlled approval/posting against bank-credit evidence. Provider- and bank-specific parsers and merchant fund release are not implemented. See the [ledger module guide](../architecture/ledgerModule.md) for accounting behavior and historical cutover precautions.
+The financial/payment part of the schema is active. MWK fee terms are snapshotted at creation; crypto fees are calculated from the provider-reported amount using `NOWPAYMENTS_FEE_BPS`. Successful verified provider events post to their denomination-specific ledger in the same database transaction as payment and attempt updates. Settlement reconciliation separately supports normalized imports and controlled approval/posting against bank-credit evidence. Provider- and bank-specific parsers and merchant fund release are not implemented. See the [ledger module guide](../architecture/ledgerModule.md) for accounting behavior and historical cutover precautions.
+
+New crypto transactions use `PaymentType.CRYPTO`, a `CryptoPaymentDetail` containing the merchant-selected asset, network, and exact decimal amount, and the `NOWPAYMENTS` provider. MWK transactions continue to use integer tambala in `MwkPaymentDetail`. Each transaction must have exactly one matching detail, and payment terms become immutable after processing starts. The split-financial-details migration backfills existing payment records and archives the former MWK snapshot for historical crypto transactions; it does not make the old MWK amount the denomination of newly created crypto transactions.
+
+Apply migrations, including `20261121140000_split_payment_financial_details`, to the intended database with `npx prisma migrate deploy --config prisma7.config.ts` before deploying code that expects this schema. This migration contains custom PostgreSQL constraints/triggers and should not be replaced with `prisma db push`. Review the SQL and back up the target database according to the deployment process; do not test it against a shared development or production database.
 
 ## 7. Database validation and maintenance
 

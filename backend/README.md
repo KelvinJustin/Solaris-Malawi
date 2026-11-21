@@ -19,17 +19,17 @@ The **Solaris Malawi Backend** is a NestJS 12 modular monolith providing a payme
 - **Admin Review:** Admin authentication, paginated merchant applications listing, review assignment, and approve/reject workflows with audit history.
 - **Transactions & Hosted Checkout:** Cryptographically encrypted checkout tokens, idempotent transaction creation, hosted checkout session validation, and payment initiation.
 - **Provider Orchestration:** A shared adapter contract and registry with a test adapter and a NOWPayments crypto adapter. Signed callback/IPN handling includes signature checks, guarded lifecycle transitions, and duplicate-event protection.
-- **NOWPayments + FX:** Crypto payment instructions are created from an MWK transaction using a configured FX quote; IPN success posts through the ledger. This is implemented and tested locally, but has not been validated against a live NOWPayments sandbox or production endpoint.
+- **Crypto-native NOWPayments:** Merchants can create crypto-denominated transactions with an exact asset/network and decimal amount. The backend passes that amount as NOWPayments `pay_amount`; its required USD price reference is informational and does not convert the payment or merchant balance to MWK. IPN success credits the merchant's original crypto asset/network. Live sandbox/production behavior still requires provider validation.
 - **Persistence:** Relational modeling for merchants, payment lifecycle, versioned fee policies, and immutable double-entry payment postings via Prisma 7 & PostgreSQL.
 - **Settlement Reconciliation:** Provider-neutral normalized provider and bank statement imports, payment matching, allocation, and approval/posting workflow. Provider- and bank-specific parsers remain integration points until real sanitized reports and documentation are available.
 
 ### Roadmap / Not Yet Implemented
 - Live Airtel Money, TNM Mpamba, and bank adapters/parsers. Do not infer their report formats or reference conventions without provider/bank documentation and sanitized samples.
 - Merchant fund release, withdrawals, refunds, reversals, available-balance operations, and public merchant balance APIs.
-- Live NOWPayments sandbox/production verification and operational confirmation of public IPN reachability and FX source freshness.
+- Live NOWPayments sandbox/production verification and operational confirmation of public IPN reachability.
 
 ### V1 Ledger Foundation
-Successful signed callbacks post balanced entries synchronously in the same PostgreSQL transaction as payment and attempt state changes. Payment creation stores an immutable fee snapshot using the active merchant override or platform default; the migration seeds a ZERO/MWK platform policy. Provider-clearing accounts represent receivables, not settled cash. Legacy `MerchantLedger` balances are reported for reconciliation only and are never converted into opening balances.
+Successful callbacks post balanced entries synchronously in the same PostgreSQL transaction as payment and attempt state changes. MWK payment creation stores an immutable fee snapshot using the active merchant override or platform default; the migration seeds a ZERO/MWK platform policy. Crypto payments use their separate crypto fee setting and native-asset ledger instead of an MWK fee snapshot. Provider-clearing accounts represent receivables, not settled cash. Legacy `MerchantLedger` balances are reported for reconciliation only and are never converted into opening balances.
 
 No fee or ledger posting API is exposed. From `backend/`, create a new controlled policy version with the `seed:fees` command; new policies are inactive unless `--activate` is specified. The version and activation changes are audited.
 
@@ -47,9 +47,7 @@ npm run ledger:backfill -- --apply
 
 Provider-neutral settlement reconciliation and controlled posting are implemented separately from payment capture. Provider/bank-specific statement parsers, merchant fund release, withdrawals, refunds, available-balance operations, and public ledger APIs are not implemented.
 
-The NOWPayments adapter is registered alongside the test adapter. It accepts a crypto `payCurrency` at checkout, converts the merchant transaction's MWK amount into the configured price currency, creates a provider payment, stores the returned address/amount and FX snapshot, and returns payment instructions. The public IPN route is `/v1/provider-callbacks/nowpayments`; callbacks require a valid `x-nowpayments-sig` signature. Stale in-flight payments are also reconciled by polling NOWPayments while the API key is configured. A `finished` result transitions payment state and posts the crypto ledger capture atomically. `NOWPAYMENTS_FEE_BPS` defaults to 0 until a crypto fee rate is approved. Partial payments enter pending reconciliation. A refund IPN received after success is retained for manual handling; it does not change the successful state or automatically reverse the ledger.
-
-The FX provider polls `open.er-api.com` by default every 15 seconds and caches rates in process memory. The upstream publishes rates daily, so the 300-second default age check measures when this process fetched the quote, not the upstream publication age. It does **not** prove that the underlying rate is current; treat this as a readiness limitation.
+The NOWPayments adapter is registered alongside the test adapter. Merchants create a crypto transaction with a decimal-string amount and the supported asset/network; checkout initiation uses the saved pair and exact amount without asking for another ticker. NOWPayments requires a fiat `price_amount` even when `pay_amount` is supplied, so the adapter obtains a USD reference estimate from NOWPayments. The exact crypto amount is sent as `pay_amount`, and the reference estimate does not change payment denomination or ledger credit. The public IPN route is `/v1/provider-callbacks/nowpayments`; callbacks require a valid `x-nowpayments-sig` signature. Stale in-flight payments are reconciled by polling NOWPayments while the API key is configured. A `finished` result posts the crypto ledger capture atomically. `NOWPAYMENTS_FEE_BPS` defaults to `0`. Partial payments enter pending reconciliation. A refund IPN received after success is retained for manual handling; it does not change the successful state or automatically reverse the ledger. See [NOWPayments integration](docs/architecture/nowpaymentsIntegration.md) for request/response details.
 
 ---
 
@@ -70,8 +68,7 @@ Solaris API (/v1)
   ├── admin/                # Merchant application review and approvals
   ├── transactions/         # Payment transactions & hosted checkout flow
   ├── payment-providers/    # Provider registry, test and NOWPayments adapters
-  ├── fx/                   # MWK conversion-rate provider used for crypto quotes
-  ├── config/               # Namespaced FX and NOWPayments configuration
+  ├── config/               # Namespaced NOWPayments configuration
   ├── provider-callbacks/   # Signed webhook callback verification
   ├── settlements/          # Provider-neutral reconciliation and posting workflow
   ├── ledger/               # Fee snapshots and immutable double-entry posting
@@ -106,7 +103,7 @@ The feature modules are registered independently; moving them under `auth/` does
 | `admin` | Application queueing, starting reviews, approving profiles, rejecting profiles with audit logs. |
 | `transactions` | Idempotent transaction generation, checkout session initialization, customer payment initiation. |
 | `payment-providers` | Provider adapter abstraction and registry; includes test and NOWPayments integrations. |
-| `fx` / `config` | In-process MWK FX quotes and namespaced adapter configuration. |
+| `config` | Namespaced NOWPayments adapter configuration. |
 | `provider-callbacks` | Cryptographic signature verification, idempotent payment success/failure state transitions. |
 | `ledger` | Versioned fee snapshots, double-entry payment posting, and historical backfill primitives. |
 | `settlements` | Normalized provider/bank imports, matching, allocations, approvals, and posting; provider-specific parsers are not included. |
@@ -151,7 +148,7 @@ Review and configure your `backend/.env` file. Essential configuration includes:
 - `CHECKOUT_TOKEN_ENCRYPTION_KEY`: 32-byte Base64-encoded AES key.
 - `SIGNING_SECRET`: Secret used for HMAC webhook verification.
 
-For NOWPayments, configure `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET`, `NOWPAYMENTS_BASE_URL`, and `PUBLIC_API_BASE_URL`. The public API URL must use reachable HTTPS for sandbox IPNs as well as production. `NOWPAYMENTS_FEE_BPS` sets the approved crypto fee (basis points; defaults to `0`), and `NOWPAYMENTS_PRICE_CURRENCY` defaults to `usd`. `NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS` defaults to `300`; `FX_RATE_API_BASE_URL` defaults to `https://open.er-api.com/v6/latest`; and `FX_RATE_POLL_INTERVAL_MS` defaults to `15000`. Because the upstream feed republishes daily, local fetch age is not proof of underlying rate freshness. Never commit actual credentials.
+For NOWPayments, configure `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET`, `NOWPAYMENTS_BASE_URL`, and `PUBLIC_API_BASE_URL`. The public API URL must use reachable HTTPS for sandbox IPNs as well as production. `NOWPAYMENTS_FEE_BPS` sets the approved crypto fee in basis points and defaults to `0`. The adapter obtains NOWPayments' required USD `price_amount` reference from its estimate API; it sends the exact merchant-entered crypto amount separately as `pay_amount`. This reference does not convert the payment or merchant balance to MWK. Never commit actual credentials.
 
 ### 3. Install Dependencies & Migrate Database
 ```bash
@@ -233,13 +230,13 @@ All routes are versioned under `/v1`.
 ### Transactions & Checkout (`/v1/transactions` & `/v1/checkout`)
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/transactions` | ApiKey / Cookie | Create a transaction with an `Idempotency-Key` header. |
+| `POST` | `/v1/transactions` | Merchant JWT | Create an MWK or crypto transaction with an `Idempotency-Key` header. |
 | `GET` | `/v1/transactions/:reference` | Cookie | Fetch transaction status and payment attempt history. |
 | `GET` | `/v1/checkout/:token` | Public | Validate and retrieve hosted checkout session details. |
 | `POST` | `/v1/checkout/:token/pay` | Public | Initiate payment through selected provider. |
 | `POST` | `/v1/provider-callbacks` | Signed | Webhook endpoint receiving signed provider callbacks. |
 
-Crypto checkout calls `POST /v1/checkout/:token/pay` with `{ "provider": "NOWPAYMENTS", "payCurrency": "..." }`; `network` is optional. On successful invoice creation, the response includes `payment_instructions` with the address, amount, currency, network, and optional expiry.
+Create a crypto-denominated transaction by sending `paymentType: "CRYPTO"`, `provider: "NOWPAYMENTS"`, `asset`, `network`, and a positive decimal-string `amount` to `POST /v1/transactions`. The selected denomination and amount are persisted with that transaction. Checkout then calls `POST /v1/checkout/:token/pay` with `{ "provider": "NOWPAYMENTS" }` only; it must not choose a replacement ticker, network, or amount. When provider payment creation succeeds, the response includes `payment_instructions` with `paymentAddress`, `payAmount`, `asset`, `network`, and `expiresAt`. Provider rejection or an uncertain result has no payment instructions; the final payment outcome is delivered through the signed NOWPayments IPN. See [NOWPayments Crypto Integration](./docs/architecture/nowpaymentsIntegration.md) for request/response examples and status behavior.
 
 ### NOWPayments Webhook
 
@@ -298,7 +295,7 @@ npm run format
 
 Detailed technical documents are stored in the `docs/` directory:
 - [Architecture Overview](./docs/architecture/overview.md)
-- [NOWPayments Adapter & FX](./docs/architecture/nowpaymentsAdapter.md)
+- [NOWPayments Crypto Integration](./docs/architecture/nowpaymentsIntegration.md)
 - [API Reference](./docs/architecture/apiReference.md)
 - [Auth Contract & Cookies](./docs/architecture/authContract.md)
 - [Database Schema & Migrations](./docs/database/setup.md)

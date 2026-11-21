@@ -13,7 +13,10 @@ import {
   CheckoutSessionStatus,
   PaymentStatus,
   FeeType,
+  PaymentType,
+  PaymentProvider,
 } from '../generated/prisma/enums.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { DatabaseService } from '../database/database.service.js';
 import { PaymentProviderRegistry } from '../payment-providers/registry/payment-provider.registry.js';
 import { CheckoutTokenService } from './checkout-token.service.js';
@@ -152,8 +155,10 @@ describe('TransactionsService', () => {
       id: 'txn-1',
       publicReference: 'sp_abc123',
       status: PaymentStatus.CREATED,
-      amountTambala: 2500,
-      currency: 'MWK',
+      paymentType: PaymentType.MWK,
+      provider: null,
+      mwkDetail: { amountTambala: 2500, currency: 'MWK' },
+      cryptoDetail: null,
     });
 
     const result = await service.create('merchant-123', 'idem-key', {
@@ -171,21 +176,27 @@ describe('TransactionsService', () => {
     expect(transactionClient.paymentTransaction.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         merchantId: 'merchant-123',
-        amountTambala: 2500,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
         customerPhone: '+265991234567',
         description: 'Coffee order',
         merchantReference: 'order-42',
         idempotencyKey: 'idem-key',
         status: PaymentStatus.CREATED,
-        feeTambala: 0n,
-        merchantNetTambala: 2500n,
-        feeType: FeeType.ZERO,
-        feePercentageBps: 0,
-        feeFixedTambala: 0n,
-        feePolicyId: 'fee-policy-zero',
-        feePolicyVersion: 1,
+        mwkDetail: {
+          create: expect.objectContaining({
+            amountTambala: 2500,
+            currency: 'MWK',
+            feeTambala: 0n,
+            merchantNetTambala: 2500n,
+            feeType: FeeType.ZERO,
+            feePercentageBps: 0,
+            feeFixedTambala: 0n,
+            feePolicyId: 'fee-policy-zero',
+            feePolicyVersion: 1,
+          }),
+        },
       }),
+      include: { mwkDetail: true, cryptoDetail: true },
     });
 
     expect(transactionClient.checkoutSession.create).toHaveBeenCalledWith({
@@ -212,11 +223,15 @@ describe('TransactionsService', () => {
       accountStatus: AccountStatus.APPROVED,
     });
     databaseService.paymentTransaction.findUnique.mockResolvedValue({
-      amountTambala: 2500,
-      currency: 'MWK',
+      publicReference: 'sp_abc123',
+      status: PaymentStatus.CREATED,
+      paymentType: PaymentType.MWK,
+      provider: null,
       customerPhone: '+265991234567',
       description: 'Coffee order',
       merchantReference: 'order-42',
+      mwkDetail: { amountTambala: 2500, currency: 'MWK' },
+      cryptoDetail: null,
       checkoutSessions: [
         {
           tokenEncrypted: 'encrypted-token',
@@ -235,8 +250,8 @@ describe('TransactionsService', () => {
         merchantReference: 'order-42',
       }),
     ).resolves.toMatchObject({
-      publicReference: undefined,
-      status: undefined,
+      publicReference: 'sp_abc123',
+      status: PaymentStatus.CREATED,
       amountTambala: 2500,
       currency: 'MWK',
       checkout_url: 'https://checkout.example.com/checkout/checkout-token',
@@ -250,11 +265,15 @@ describe('TransactionsService', () => {
       accountStatus: AccountStatus.APPROVED,
     });
     databaseService.paymentTransaction.findUnique.mockResolvedValue({
-      amountTambala: 2500,
-      currency: 'MWK',
+      publicReference: 'sp_abc123',
+      status: PaymentStatus.CREATED,
+      paymentType: PaymentType.MWK,
+      provider: null,
       customerPhone: '+265991234567',
       description: 'Original coffee order',
       merchantReference: 'order-42',
+      mwkDetail: { amountTambala: 2500, currency: 'MWK' },
+      cryptoDetail: null,
       checkoutSessions: [],
     });
 
@@ -276,8 +295,9 @@ describe('TransactionsService', () => {
       expiresAt: new Date(Date.now() + 60_000),
       transaction: {
         publicReference: 'sp_abc123',
-        amountTambala: 2500,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: { amountTambala: 2500, currency: 'MWK' },
+        cryptoDetail: null,
         description: 'Coffee order',
         status: PaymentStatus.CREATED,
       },
@@ -301,8 +321,9 @@ describe('TransactionsService', () => {
       expiresAt: new Date(Date.now() - 1000),
       transaction: {
         publicReference: 'sp_abc123',
-        amountTambala: 2500,
-        currency: 'MWK',
+        paymentType: PaymentType.MWK,
+        mwkDetail: { amountTambala: 2500, currency: 'MWK' },
+        cryptoDetail: null,
         description: 'Coffee order',
         status: PaymentStatus.CREATED,
       },
@@ -322,7 +343,21 @@ describe('TransactionsService', () => {
   });
 
   it('returns only public transaction fields for the owning merchant', async () => {
-    const transaction = {
+    const storedTransaction = {
+      publicReference: 'sp_123',
+      paymentType: PaymentType.MWK,
+      mwkDetail: { amountTambala: 2500, currency: 'MWK' },
+      cryptoDetail: null,
+      status: PaymentStatus.SUCCEEDED,
+      provider: 'TEST',
+      description: 'Coffee order',
+      merchantReference: 'order-42',
+      createdAt: new Date('2025-01-01T00:00:00.000Z'),
+      processedAt: new Date('2025-01-01T00:01:00.000Z'),
+    };
+    databaseService.paymentTransaction.findFirst.mockResolvedValue(storedTransaction);
+
+    await expect(service.findOne('merchant-123', 'sp_123')).resolves.toEqual({
       publicReference: 'sp_123',
       amountTambala: 2500,
       currency: 'MWK',
@@ -332,18 +367,16 @@ describe('TransactionsService', () => {
       merchantReference: 'order-42',
       createdAt: new Date('2025-01-01T00:00:00.000Z'),
       processedAt: new Date('2025-01-01T00:01:00.000Z'),
-    };
-    databaseService.paymentTransaction.findFirst.mockResolvedValue(transaction);
-
-    await expect(service.findOne('merchant-123', 'sp_123')).resolves.toEqual(
-      transaction,
-    );
+    });
     expect(databaseService.paymentTransaction.findFirst).toHaveBeenCalledWith({
       where: { publicReference: 'sp_123', merchantId: 'merchant-123' },
       select: {
         publicReference: true,
-        amountTambala: true,
-        currency: true,
+        paymentType: true,
+        mwkDetail: { select: { amountTambala: true, currency: true } },
+        cryptoDetail: {
+          select: { asset: true, network: true, requestedAmount: true },
+        },
         status: true,
         provider: true,
         description: true,
@@ -352,6 +385,82 @@ describe('TransactionsService', () => {
         processedAt: true,
       },
     });
+  });
+
+  it('creates crypto-native transactions from the exact decimal input without an MWK fee snapshot', async () => {
+    databaseService.merchantProfile.findUnique.mockResolvedValue({
+      accountStatus: AccountStatus.APPROVED,
+    });
+    databaseService.paymentTransaction.findUnique.mockResolvedValue(null);
+    transactionClient.paymentTransaction.create.mockResolvedValue({
+      id: 'crypto-txn-1',
+      publicReference: 'sp_crypto123',
+      status: PaymentStatus.CREATED,
+      paymentType: PaymentType.CRYPTO,
+      provider: PaymentProvider.NOWPAYMENTS,
+      customerPhone: null,
+      description: null,
+      merchantReference: null,
+      mwkDetail: null,
+      cryptoDetail: {
+        asset: 'USDT',
+        network: 'TRC20',
+        requestedAmount: new Prisma.Decimal('10.123456789012345678'),
+      },
+    });
+
+    await expect(
+      service.create('merchant-123', 'crypto-key', {
+        paymentType: PaymentType.CRYPTO,
+        provider: PaymentProvider.NOWPAYMENTS,
+        asset: 'usdt',
+        network: 'trc20',
+        amount: '10.123456789012345678',
+      }),
+    ).resolves.toMatchObject({
+      publicReference: 'sp_crypto123',
+      paymentType: PaymentType.CRYPTO,
+      provider: PaymentProvider.NOWPAYMENTS,
+      asset: 'USDT',
+      network: 'TRC20',
+      amount: '10.123456789012345678',
+    });
+
+    expect(transactionClient.feePolicy.findFirst).not.toHaveBeenCalled();
+    expect(transactionClient.paymentTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          paymentType: PaymentType.CRYPTO,
+          provider: PaymentProvider.NOWPAYMENTS,
+          cryptoDetail: {
+            create: {
+              asset: 'USDT',
+              network: 'TRC20',
+              requestedAmount: '10.123456789012345678',
+              providerCurrency: 'usdttrc20',
+            },
+          },
+        }),
+      }),
+    );
+    expect(transactionClient.checkoutSession.create).toHaveBeenCalled();
+  });
+
+  it('rejects unsupported crypto pairs before persisting a transaction', async () => {
+    databaseService.merchantProfile.findUnique.mockResolvedValue({
+      accountStatus: AccountStatus.APPROVED,
+    });
+
+    await expect(
+      service.create('merchant-123', 'crypto-key', {
+        paymentType: PaymentType.CRYPTO,
+        provider: PaymentProvider.NOWPAYMENTS,
+        asset: 'USDT',
+        network: 'UNKNOWN',
+        amount: '1.00',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(transactionClient.paymentTransaction.create).not.toHaveBeenCalled();
   });
 
   it('throws when a merchant asks for a missing transaction by public reference', async () => {

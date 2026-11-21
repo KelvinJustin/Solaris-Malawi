@@ -60,7 +60,7 @@ On Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-Configure the required application, database, authentication, SMTP, object-storage, and checkout settings from `.env.example`. The following shows core application and NOWPayments/FX settings; the example file also includes frontend/CORS, Redis, SMTP, and storage options:
+Configure the required application, database, authentication, SMTP, object-storage, and checkout settings from `.env.example`. The following shows core application and NOWPayments settings; the example file also includes frontend/CORS, Redis, SMTP, and storage options:
 
 ```env
 PORT=3000
@@ -93,14 +93,10 @@ NOWPAYMENTS_API_KEY=REPLACE_WITH_YOUR_NOWPAYMENTS_API_KEY
 NOWPAYMENTS_IPN_SECRET=REPLACE_WITH_YOUR_NOWPAYMENTS_IPN_SECRET
 NOWPAYMENTS_BASE_URL=https://api-sandbox.nowpayments.io/v1
 PUBLIC_API_BASE_URL=REPLACE_WITH_YOUR_PUBLIC_HTTPS_URL
-NOWPAYMENTS_PRICE_CURRENCY=usd
-NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS=300
 NOWPAYMENTS_FEE_BPS=0
-FX_RATE_API_BASE_URL=https://open.er-api.com/v6/latest
-FX_RATE_POLL_INTERVAL_MS=15000
 ```
 
-For local NOWPayments sandbox IPNs, `PUBLIC_API_BASE_URL` must be a publicly reachable HTTPS URL (for example, a temporary tunnel); localhost cannot receive provider callbacks. Sandbox and production use separate credentials and endpoints. The default FX feed republishes daily, so the 300-second threshold only measures local fetch age and does not guarantee upstream rate freshness. See [NOWPayments adapter](../architecture/nowpaymentsAdapter.md) for the full configuration and readiness caveats.
+For local NOWPayments sandbox IPNs, `PUBLIC_API_BASE_URL` must be a publicly reachable HTTPS URL (for example, a temporary tunnel); localhost cannot receive provider callbacks. Sandbox and production use separate credentials and endpoints. Crypto transactions store the exact asset, network, and amount entered by the merchant. NOWPayments also requires a fiat `price_amount`; the backend gets a USD reference estimate from NOWPayments while passing the exact crypto amount as `pay_amount`. This reference does not convert the transaction or merchant balance to MWK. See [NOWPayments integration](../architecture/nowpaymentsIntegration.md) for the API flow and configuration details.
 
 The example file documents local MinIO defaults and how to switch to Cloudflare R2. Never commit `.env` or real secrets.
 

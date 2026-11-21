@@ -18,6 +18,7 @@ import { ProviderCallbacksService } from './provider-callbacks.service.js';
 
 import { isNowPaymentsIpnPayload } from '../payment-providers/adapters/nowpayments/nowpayments-webhook-payload.guard.js';
 import { verifyNowPaymentsIpnSignature } from '../payment-providers/adapters/nowpayments/nowpayments-ipn.util.js';
+import { parseLosslessNowPaymentsJson } from '../payment-providers/adapters/nowpayments/nowpayments-json.util.js';
 
 @Controller('provider-callbacks')
 export class ProviderCallbacksController {
@@ -60,18 +61,26 @@ export class ProviderCallbacksController {
     @HttpCode(HttpStatus.OK)
     async handleNowPaymentsCallback(
         @Body() body: unknown,
+        @Req() request: RawBodyRequest<Request>,
         @Headers('x-nowpayments-sig') signature: string | undefined,
     ) {
         const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
 
-        if (!ipnSecret || !verifyNowPaymentsIpnSignature(body, signature, ipnSecret)) {
+          if (
+              !request.rawBody ||
+              !ipnSecret ||
+              !verifyNowPaymentsIpnSignature(body, signature, ipnSecret)
+          ) {
             throw new UnauthorizedException('Invalid or missing callback signature');
         }
 
-        if (!isNowPaymentsIpnPayload(body)) {
+          const losslessBody = parseLosslessNowPaymentsJson(
+              request.rawBody.toString('utf8'),
+          );
+          if (!isNowPaymentsIpnPayload(losslessBody)) {
             throw new BadRequestException('Unrecognized NOWPayments callback payload');
         }
 
-        return this.providerCallbacksService.handleNowPaymentsCallback(body);
+          return this.providerCallbacksService.handleNowPaymentsCallback(losslessBody);
     }
 }

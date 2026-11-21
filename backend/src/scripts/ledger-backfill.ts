@@ -2,7 +2,11 @@ import 'dotenv/config';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createFileLogger, flushFileLogger } from '../logging/file-logger.js';
-import { LedgerTransactionStatus, PaymentStatus } from '../generated/prisma/enums.js';
+import {
+  LedgerTransactionStatus,
+  PaymentStatus,
+  PaymentType,
+} from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
 import { LedgerPostingService } from '../ledger/ledger-posting.service.js';
 import { assessLegacyPayment, nonzeroLegacyMerchantLedgers } from '../ledger/legacy-backfill.js';
@@ -23,9 +27,11 @@ async function main(): Promise<void> {
   const ledger = new LedgerPostingService();
   try {
     const payments = await database.paymentTransaction.findMany({
+      where: { paymentType: PaymentType.MWK },
       include: {
         attempts: true,
         merchant: { select: { id: true } },
+        mwkDetail: true,
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -59,13 +65,26 @@ async function main(): Promise<void> {
     const eligible: typeof payments = [];
     const excluded: Array<{ paymentReference: string; paymentId: string; reason: string }> = [];
     for (const payment of payments) {
+      const detail = payment.mwkDetail;
+      if (!detail) {
+        throw new Error(
+          `MWK payment ${payment.publicReference} has no MWK payment detail`,
+        );
+      }
       const providerAccount = payment.status === PaymentStatus.SUCCEEDED && payment.provider
         ? await database.ledgerAccount.findUnique({
-            where: { key: `provider-clearing:${payment.currency}:${payment.provider}` },
+            where: { key: `provider-clearing:${detail.currency}:${payment.provider}` },
             select: { status: true, code: true, currency: true, provider: true, merchantId: true },
           })
         : null;
-      const reason = assessLegacyPayment(payment, providerAccount);
+      const reason = assessLegacyPayment(
+        {
+          ...payment,
+          amountTambala: detail.amountTambala,
+          currency: detail.currency,
+        },
+        providerAccount,
+      );
       if (reason) excluded.push({ paymentReference: payment.publicReference, paymentId: payment.id, reason });
       else eligible.push(payment);
     }
@@ -92,9 +111,9 @@ async function main(): Promise<void> {
     let eligibleAmount = 0n;
     let postedAmount = 0n;
     let plannedMerchantNet = 0n;
-    for (const payment of eligible) eligibleAmount += BigInt(payment.amountTambala);
-    for (const payment of alreadyPosted) postedAmount += BigInt(payment.amountTambala);
-    for (const payment of toPost) plannedMerchantNet += payment.merchantNetTambala;
+    for (const payment of eligible) eligibleAmount += BigInt(payment.mwkDetail!.amountTambala);
+    for (const payment of alreadyPosted) postedAmount += BigInt(payment.mwkDetail!.amountTambala);
+    for (const payment of toPost) plannedMerchantNet += payment.mwkDetail!.merchantNetTambala;
 
     const existingPendingBalances = await database.ledgerAccountBalance.findMany({
       where: { account: { code: 'MERCHANT_PENDING' } },
@@ -112,9 +131,10 @@ async function main(): Promise<void> {
 
     const projectedPendingBalances = { ...pendingByMerchant };
     for (const payment of toPost) {
-      const key = `${payment.merchantId}:${payment.currency}`;
+      const detail = payment.mwkDetail!;
+      const key = `${payment.merchantId}:${detail.currency}`;
       projectedPendingBalances[key] = asString(
-        BigInt(projectedPendingBalances[key] ?? '0') + payment.merchantNetTambala,
+        BigInt(projectedPendingBalances[key] ?? '0') + detail.merchantNetTambala,
       );
     }
 
@@ -123,16 +143,22 @@ async function main(): Promise<void> {
     if (apply) {
       for (const payment of toPost) {
         try {
+          const detail = payment.mwkDetail;
+          if (!detail) {
+            throw new Error(
+              `MWK payment ${payment.publicReference} has no MWK payment detail`,
+            );
+          }
           await database.$transaction(async (tx) => {
             await ledger.postSuccessfulPayment(tx, {
               paymentId: payment.id,
               publicReference: payment.publicReference,
               merchantId: payment.merchantId,
               provider: payment.provider!,
-              amountTambala: BigInt(payment.amountTambala),
-              feeTambala: payment.feeTambala,
-              merchantNetTambala: payment.merchantNetTambala,
-              currency: payment.currency,
+              amountTambala: BigInt(detail.amountTambala),
+              feeTambala: detail.feeTambala,
+              merchantNetTambala: detail.merchantNetTambala,
+              currency: detail.currency,
               source: 'HISTORICAL_BACKFILL',
               backfilledAt: runAt,
             });

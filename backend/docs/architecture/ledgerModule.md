@@ -4,18 +4,18 @@ This document describes the ledger behavior implemented in Solaris today: succes
 
 ## 1. Scope and invariants
 
-The V1 ledger records a provider-confirmed successful payment as a balanced, immutable double-entry transaction. The ledger is the financial record for those postings; `MerchantLedger` remains a legacy table for reconciliation and is not used as the ledger source of truth.
+The MWK ledger records a provider-confirmed successful MWK payment as a balanced, immutable double-entry transaction. Crypto payments use a separate native-asset ledger described in [Crypto payment postings](#10-crypto-payment-postings). The ledgers are financial records for their own denominations; `MerchantLedger` remains a legacy table for reconciliation and is not used as the ledger source of truth.
 
 The implementation enforces these rules:
 
 - Every posted transaction has at least two positive entries.
 - Total debits equal total credits, and every entry uses the transaction currency.
-- Payment amounts are integer tambala (`100 tambala = 1 MWK`). Persisted entry amounts use PostgreSQL `BIGINT` / Prisma `BigInt`, not floating-point arithmetic.
+- MWK payment amounts are integer tambala (`100 tambala = 1 MWK`). Persisted MWK entry amounts use PostgreSQL `BIGINT` / Prisma `BigInt`; crypto entries use exact decimal amounts in the original asset/network.
 - A posted transaction and its entries cannot be changed or deleted. Corrections require a future compensating posting flow; direct edits are not supported.
 - One payment-success posting is permitted per payment, enforced by the unique tuple `sourceType`, `sourceId`, and `postingPurpose`.
 - Projection updates and ledger entries are committed atomically.
 
-The initial supported currency is MWK. Provider-clearing accounts are receivables from payment providers, not evidence that cash has reached a Solaris bank account.
+The MWK ledger handles MWK provider-clearing accounts, which are receivables from payment providers, not evidence that cash has reached a Solaris bank account.
 Merchant pending and merchant available are separate liability concepts; only merchant-pending accounts exist. Settlement posting clears provider receivables against reconciled bank credits but does not release merchant funds to an available balance or expose a merchant balance API.
 
 ## 2. V1 boundaries
@@ -24,7 +24,7 @@ Implemented now:
 
 - Successful provider callback posting.
 - Platform default and merchant-specific versioned fee policies.
-- Immutable fee snapshots stored on each payment.
+- Immutable fee snapshots stored on each MWK payment.
 - Provider-clearing, merchant-pending, and fee-revenue accounts.
 - Account debit/credit balance projections.
 - Controlled, dry-run-first historical successful-payment backfill.
@@ -134,7 +134,7 @@ The report is created exclusively so an earlier report cannot be overwritten. By
 
 A payment is eligible only when it is `SUCCEEDED`, has a merchant and provider, has provider reference and processed time, has a matching `SUCCEEDED` attempt with provider reference and completion time, has a positive amount, and has an active provider-clearing account mapping. Non-success payment states (such as `CREATED`, `PROCESSING`, `FAILED`, and `PENDING_RECONCILIATION`), as well as successful but ambiguous records, are reported as excluded. Each eligible payment is uniquely posted as source `PAYMENT` / purpose `SUCCESS`, so a rerun does not duplicate a posting.
 
-For legacy payment records, the migration adds a zero-fee snapshot because this codebase had no reliable historical fee fields. It does not change original payment status, amount, or timestamps. Backfilled ledger transactions record `HISTORICAL_BACKFILL` provenance and a backfill timestamp. Each payment is applied in a separate database transaction; failed items are reported and can be retried safely.
+For legacy MWK payment records, the migration adds a zero-fee snapshot because this codebase had no reliable historical fee fields. It does not change original payment status, amount, or timestamps. Backfilled ledger transactions record `HISTORICAL_BACKFILL` provenance and a backfill timestamp. Each payment is applied in a separate database transaction; failed items are reported and can be retried safely.
 An existing non-`POSTED` transaction is reported and excluded; the command does not repair it automatically, so investigate and resolve it manually before retrying. Nonzero legacy `MerchantLedger` balances are reported separately and are never inferred as opening balances.
 
 To post, first review the dry-run report and obtain cutover/reconciliation approval, then explicitly use:
@@ -216,6 +216,6 @@ These normalized endpoints do not decode source-provider or bank-specific report
 
 ## 10. Crypto payment postings
 
-NOWPayments capture uses a separate native-asset ledger (`CryptoLedgerAccount`, `CryptoLedgerTransaction`, `CryptoLedgerEntry`, and `CryptoLedgerAccountBalance`) rather than converting `actually_paid` back to MWK. `CryptoLedgerPostingService` debits provider crypto clearing and credits the merchant's crypto liability; a nonzero fee adds a platform crypto revenue credit. The payment state, crypto detail, and posting are updated in the same Prisma transaction.
+NOWPayments capture uses a separate native-asset ledger (`CryptoLedgerAccount`, `CryptoLedgerTransaction`, `CryptoLedgerEntry`, and `CryptoLedgerAccountBalance`) rather than converting `actually_paid` back to MWK. Crypto requests persist the merchant's exact asset, network, and decimal-string amount before provider initiation. `CryptoLedgerPostingService` debits provider crypto clearing and credits the merchant's crypto liability; a nonzero fee adds a platform crypto revenue credit. The payment state, crypto detail, and posting are updated in the same Prisma transaction.
 
 `NOWPAYMENTS_FEE_BPS` controls the merchant-absorbed crypto fee against the provider-reported `actually_paid` amount. It is an integer basis-point setting from 0 to 9999; the default is `0` to preserve current behavior until a rate is approved. The crypto fee is separate from the MWK fee-policy snapshot, and this ledger does not expose a merchant balance or withdrawal API.

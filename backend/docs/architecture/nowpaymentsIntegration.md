@@ -1,297 +1,186 @@
-# NOWPayments Crypto Payment Integration
+# NOWPayments Crypto Integration
 
-## OVERVIEW
+This guide documents the NOWPayments crypto flow as implemented in the backend. It is intended for checkout clients and merchant dashboard developers.
 
-The backend can create a NOWPayments invoice for a Solaris-hosted checkout. A customer pays in the cryptocurrency selected by the frontend, and NOWPayments later reports the final outcome through a signature-verified IPN webhook. A successful, uniquely posted result credits the merchant's crypto ledger balance in the original asset and network (for example USDT on TRC20). The `PaymentTransaction` remains denominated in MWK for its original payment request and fee snapshot; MWK is **display-estimate only** for crypto and is not converted or posted to the merchant's crypto balance.
+## 1. Overview
 
-1. A merchant creates a payment transaction.
-2. Solaris creates and returns a hosted checkout URL.
-3. The customer opens the checkout, selects `NOWPAYMENTS`, and submits a NOWPayments pay currency.
-4. Solaris creates a NOWPayments invoice and returns a payment address and crypto amount.
-5. The customer pays using that address and amount.
-6. NOWPayments sends `POST /v1/provider-callbacks/nowpayments`.
-7. Solaris validates the IPN, updates the payment status, and posts a successful payment to the merchant crypto ledger.
+Merchants can request payment directly in a supported cryptocurrency by supplying the asset, network, and exact decimal-string amount. The backend sends that amount as NOWPayments `pay_amount`, and a successful payment credits the merchant's balance in the same asset/network after applying `NOWPAYMENTS_FEE_BPS`. The MWK payment path remains separate. NOWPayments requires a fiat `price_amount`; the backend requests a USD estimate from NOWPayments for that provider-only reference, but this estimate does not change the transaction amount, currency, or crypto ledger balance. Crypto balances are not converted to MWK; any MWK equivalent is only a display estimate outside this payment flow.
 
-The API uses URI versioning. Although `main.ts` does not call `app.setGlobalPrefix()`, it enables default URI version `1`, so all routes below are under `/v1`.
+1. Merchant creates a crypto transaction and receives a hosted checkout URL.
+2. Customer opens checkout; the saved asset, network, and amount are displayed.
+3. Checkout calls the initiation endpoint with `provider: "NOWPAYMENTS"`.
+4. The backend requests a USD reference estimate, then creates the provider payment with the exact saved crypto amount as `pay_amount`.
+5. Customer sends crypto to the returned address.
+6. NOWPayments sends a signed IPN to the backend.
+7. On `finished`, the backend records the actual amount received and posts the crypto merchant balance and fee atomically.
 
-## ENDPOINTS
+## 2. Endpoints
 
-### 1. Create a checkout transaction
+All routes use the global `/v1` prefix. Examples use `https://api.example.com`; replace it with the backend's public base URL.
 
-**Method and path:** `POST /v1/transactions`
+### Create a crypto transaction
 
-**Authentication:** Merchant JWT required. Use the `access_token` HTTP-only cookie or `Authorization: Bearer <jwt>`. The guard also uses Arcjet.
+**`POST /v1/transactions`**
 
-**Headers:**
-
-```http
-Idempotency-Key: merchant-order-2026-001
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example
-Content-Type: application/json
-```
-
-`Idempotency-Key` is required and is limited to 255 characters.
-
-**Request body:**
+- **Auth:** Merchant JWT required (`Authorization: Bearer ...` or the `access_token` cookie); the route also uses `ArcjetGuard`.
+- **Headers:** `Idempotency-Key` is required. Reusing the key with identical payment data returns the existing transaction; using it for different data returns `409 Conflict`.
+- **Request body:**
 
 ```json
 {
-  "amountTambala": 50000,
-  "customerPhone": "+265991234567",
-  "description": "Website order 2026-001",
-  "merchantReference": "merchant-order-2026-001"
-}
-```
-
-Field rules:
-
-- `amountTambala`: integer, 1 through 2147483647. Tambala is 1/100 of MWK.
-- `customerPhone`: optional; when present, must be a valid Malawian phone number.
-- `description`: optional string, maximum 255 characters.
-- `merchantReference`: optional string, maximum 100 characters.
-
-`currency` is always set to `MWK` by the backend.
-
-**Successful response, with a reusable active checkout session:**
-
-```json
-{
-  "publicReference": "sp_01f2b7c4e5a84a2abce3",
-  "status": "CREATED",
-  "amountTambala": 50000,
-  "currency": "MWK",
-  "checkout_url": "https://pay.example.com/v1/checkout/opaque-token",
-  "expires_at": "2026-11-21T12:36:27.327Z"
-}
-```
-
-If the same idempotency key is retried after the original session has expired or been consumed, the response is:
-
-```json
-{
-  "publicReference": "sp_01f2b7c4e5a84a2abce3",
-  "status": "PROCESSING",
-  "amountTambala": 50000,
-  "currency": "MWK",
-  "checkout_url": null,
-  "expires_at": null
-}
-```
-
-The status and session details are read from the existing transaction; the endpoint does not create or reopen a duplicate checkout.
-
-**Errors:**
-
-| Status | Exception | When |
-|---|---|---|
-| `400 Bad Request` | `BadRequestException` / Nest validation | Missing or invalid `Idempotency-Key`, or any invalid/unknown request field, amount, or phone number |
-| `403 Forbidden` | `ForbiddenException` | Authenticated merchant's profile is not `APPROVED` |
-| `409 Conflict` | `ConflictException` | The idempotency key was already used with different payment details |
-| `429 Too Many Requests` | Arcjet `HttpException` | Rate limit denied |
-| `403 Forbidden` | Arcjet `HttpException` | Bot detected or another Arcjet block |
-| `401 Unauthorized` | Passport JWT / `UnauthorizedException` | Missing, expired, revoked, invalid, or suspended merchant identity |
-
-**Curl:**
-
-```bash
-curl --fail-with-body \
-  -b 'access_token=<merchant-jwt>' \
-  -H 'Idempotency-Key: merchant-order-2026-001' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "amountTambala": 50000,
-    "customerPhone": "+265991234567",
-    "description": "Website order 2026-001",
-    "merchantReference": "merchant-order-2026-001"
-  }' \
-  'http://localhost:3000/v1/transactions'
-```
-
-### 2. Read a transaction
-
-**Method and path:** `GET /v1/transactions/:reference`
-
-**Authentication:** Merchant JWT required. Use the `access_token` cookie or bearer header. The route is also protected by Arcjet.
-
-**Request body:** None.
-
-**Successful response:**
-
-```json
-{
-  "publicReference": "sp_01f2b7c4e5a84a2abce3",
-  "amountTambala": 50000,
-  "currency": "MWK",
-  "status": "PROCESSING",
+  "paymentType": "CRYPTO",
   "provider": "NOWPAYMENTS",
-  "description": "Website order 2026-001",
-  "merchantReference": "merchant-order-2026-001",
-  "createdAt": "2026-11-21T12:06:27.327Z",
-  "processedAt": null
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75000000",
+  "description": "Order INV-2048",
+  "merchantReference": "INV-2048"
 }
 ```
 
-`provider` can be `NOWPAYMENTS`, `AIRTEL_MONEY`, `TN_MPAMBA`, or `TEST`. `processedAt` is set only for a terminal provider result.
+`amount` is a positive decimal string with at most 18 integer and 18 fractional digits. `asset` and `network` must resolve to a supported pair. Native assets such as BTC use `"network": null`. Do not send `amountTambala` for a crypto transaction.
 
-**Errors:**
-
-| Status | Exception | When |
-|---|---|---|
-| `404 Not Found` | `NotFoundException` | Reference is unknown or belongs to another merchant |
-| `401 Unauthorized` | Passport JWT / `UnauthorizedException` | Missing, expired, revoked, invalid, or suspended merchant identity |
-| `429 Too Many Requests` | Arcjet `HttpException` | Rate limit denied |
-| `403 Forbidden` | Arcjet `HttpException` | Bot detected or blocked |
-
-**Curl:**
-
-```bash
-curl --fail-with-body \
-  -b 'access_token=<merchant-jwt>' \
-  'http://localhost:3000/v1/transactions/sp_01f2b7c4e5a84a2abce3'
-```
-
-### 3. Read hosted checkout details
-
-**Method and path:** `GET /v1/checkout/:token`
-
-**Authentication:** Public. No merchant JWT is used. The checkout token in the path is the authority.
-
-**Request body:** None.
-
-**Successful response:**
+- **Response (`201 Created`):**
 
 ```json
 {
-  "reference": "sp_01f2b7c4e5a84a2abce3",
-  "amountTambala": 50000,
-  "currency": "MWK",
-  "description": "Website order 2026-001",
+  "publicReference": "sp_6f4894f6b4494cb49dc9a1f89ec7b264",
   "status": "CREATED",
+  "paymentType": "CRYPTO",
+  "provider": "NOWPAYMENTS",
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75",
+  "checkout_url": "https://checkout.example.com/checkout/6Kb3nM9m4jQv2XgD",
+  "expires_at": "2026-11-21T16:30:00.000Z"
+}
+```
+
+The amount is normalized without insignificant trailing zeroes. The server requires the merchant profile to be `APPROVED` (`403 Forbidden`, `ForbiddenException`). Invalid fields, unsupported pairs, and missing/invalid idempotency keys result in `400 Bad Request` (`BadRequestException`); a conflicting idempotency-key reuse results in `409 Conflict` (`ConflictException`). A missing/invalid `CHECKOUT_BASE_URL` or a stored transaction without its matching payment detail results in `500 Internal Server Error` (`InternalServerErrorException`). Authentication and Arcjet guards can reject the request before service validation.
+
+```bash
+curl -X POST "https://api.example.com/v1/transactions" \
+  -H "Authorization: Bearer $MERCHANT_JWT" \
+  -H "Idempotency-Key: inv-2048-crypto" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "paymentType": "CRYPTO",
+    "provider": "NOWPAYMENTS",
+    "asset": "USDT",
+    "network": "TRC20",
+    "amount": "25.75",
+    "description": "Order INV-2048",
+    "merchantReference": "INV-2048"
+  }'
+```
+
+### Open hosted checkout
+
+**`GET /v1/checkout/:token`**
+
+- **Auth:** Public; access is controlled by the checkout token.
+- **Response (`200 OK`):**
+
+```json
+{
+  "reference": "sp_6f4894f6b4494cb49dc9a1f89ec7b264",
+  "status": "CREATED",
+  "paymentType": "CRYPTO",
+  "provider": "NOWPAYMENTS",
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75",
+  "description": "Order INV-2048",
   "canPay": true
 }
 ```
 
-`canPay` is `true` only when the transaction status is `CREATED`.
-
-**Errors:**
-
-| Status | Exception | When |
-|---|---|---|
-| `404 Not Found` | `NotFoundException` | Token is missing/longer than 200 characters, unknown, consumed, revoked, or expired |
-
-**Curl:**
+`404 Not Found` (`NotFoundException`) is returned for missing, expired, inactive, or consumed checkout links. `canPay` is true only while the transaction is `CREATED`. A corrupt transaction without its matching payment detail results in `500 Internal Server Error` (`InternalServerErrorException`).
 
 ```bash
-curl --fail-with-body \
-  'http://localhost:3000/v1/checkout/opaque-token'
+curl "https://api.example.com/v1/checkout/6Kb3nM9m4jQv2XgD"
 ```
 
-### 4. Initiate NOWPayments from a hosted checkout
+### Initiate NOWPayments checkout
 
-**Method and path:** `POST /v1/checkout/:token/pay`
+**`POST /v1/checkout/:token/pay`**
 
-**Authentication:** Public checkout endpoint. No merchant JWT; the opaque checkout token and active checkout session are checked by the service. The route is protected by Arcjet.
-
-**Request body:**
+- **Auth:** Public; the checkout token authorizes the operation. The route also uses `ArcjetGuard`.
+- **Request body:**
 
 ```json
 {
-  "provider": "NOWPAYMENTS",
-  "payCurrency": "usdttrc20",
-  "network": "TRC20"
+  "provider": "NOWPAYMENTS"
 }
 ```
 
-Actual DTO rules:
+Do not send `payCurrency`, `network`, `amount`, or a phone number here. The selected asset, network, and amount were saved when the merchant created the transaction.
 
-- `provider`: required enum; use exactly `NOWPAYMENTS`.
-- `payCurrency`: required string for NOWPayments. Examples include `usdttrc20`, `usdterc20`, `btc`, `eth`, and `trx`.
-- `network`: optional string. It is display metadata and the NOWPayments response's network value wins when the provider supplies one.
-- `phoneNumber`: optional DTO field but not required or meaningful for NOWPayments.
-
-**Response when NOWPayments returns usable payment instructions:**
+- **Accepted initiation response (`201 Created`):**
 
 ```json
 {
-  "reference": "sp_01f2b7c4e5a84a2abce3",
+  "reference": "sp_6f4894f6b4494cb49dc9a1f89ec7b264",
   "status": "PROCESSING",
   "provider": "NOWPAYMENTS",
   "message": "Payment request accepted. Awaiting customer completion.",
   "payment_instructions": {
-    "paymentAddress": "TExampleNOWPaymentsDepositAddress",
-    "payAmount": "12.345678",
-    "payCurrency": "usdttrc20",
+    "paymentAddress": "TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE",
+    "payAmount": "25.75",
+    "asset": "USDT",
     "network": "TRC20",
-    "expiresAt": "2026-11-21T12:36:27.327Z"
+    "expiresAt": "2026-11-21T16:50:00.000Z"
   }
 }
 ```
 
-`payment_instructions` is present only for an accepted NOWPayments invoice. Creating the invoice does not mean the customer has paid.
+`payment_instructions` appears only when provider creation is accepted. A rejected or ambiguous initiation has no `payment_instructions`; it returns `FAILED` or `PENDING_RECONCILIATION` respectively, with the corresponding message. `PROCESSING` means the address/instructions exist, not that the payment is complete.
 
-**Response when NOWPayments rejects or cannot answer invoice creation:**
-
-```json
-{
-  "reference": "sp_01f2b7c4e5a84a2abce3",
-  "status": "FAILED",
-  "provider": "NOWPAYMENTS",
-  "message": "Payment failed or the provider rejected the request."
-}
-```
-
-For an unclassified/unknown result, the response shape is the same without `payment_instructions`, but `status` is `PENDING_RECONCILIATION` and the message is:
-
-```json
-{
-  "reference": "sp_01f2b7c4e5a84a2abce3",
-  "status": "PENDING_RECONCILIATION",
-  "provider": "NOWPAYMENTS",
-  "message": "Payment outcome is uncertain and requires reconciliation."
-}
-```
-
-Internally, provider rejection codes can include `CONFIG_MISSING`, `FX_QUOTE_STALE`, `FX_CONVERSION_FAILED`, or `PROVIDER_REQUEST_FAILED`, but the public HTTP response does not currently expose `failureCode` or `failureMessage`.
-
-**Errors:**
-
-| Status | Exception | When |
-|---|---|---|
-| `400 Bad Request` | `BadRequestException` / Nest validation | `payCurrency` is missing/blank, or DTO validation rejects the body |
-| `404 Not Found` | `NotFoundException` | Checkout token is unknown, inactive, consumed, or expired |
-| `409 Conflict` | `ConflictException` | The transaction is no longer `CREATED`, or the checkout/transaction has already been claimed concurrently |
-| `503 Service Unavailable` | `ServiceUnavailableException` | NOWPayments API key is not configured, or the NOWPayments API cannot be reached |
-| `502 Bad Gateway` | `BadGatewayException` | NOWPayments returns a non-OK HTTP response or a non-JSON/unusable response |
-| `500 Internal Server Error` | `InternalServerErrorException` | `PUBLIC_API_BASE_URL`, `CHECKOUT_BASE_URL`, or FX/crypto posting configuration is invalid/missing |
-| `429 Too Many Requests` | Arcjet `HttpException` | Rate limit denied |
-| `403 Forbidden` | Arcjet `HttpException` | Bot detected or blocked |
-
-An accepted NOWPayments HTTP response is still followed by a normal `200` initiation response. Provider `REJECTED` and `UNKNOWN` outcomes are encoded in the JSON `status` field rather than being thrown as provider-specific HTTP errors in every case.
-
-**Curl:**
+The endpoint returns `404 Not Found` (`NotFoundException`) for an invalid/expired link; `409 Conflict` (`ConflictException`) if the checkout is already used or the transaction is no longer `CREATED`; and `400 Bad Request` (`BadRequestException`) if the provider does not match the transaction type or a mobile-money phone number is missing. In the crypto path, NOWPayments configuration/estimate/create failures are represented in the `201 Created` response as `FAILED` or `PENDING_RECONCILIATION` and have no payment instructions; they are not returned as provider HTTP exceptions. Authentication is not required, but the route has Arcjet protection.
 
 ```bash
-curl --fail-with-body \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "provider": "NOWPAYMENTS",
-    "payCurrency": "usdttrc20",
-    "network": "TRC20"
-  }' \
-  'http://localhost:3000/v1/checkout/opaque-token/pay'
+curl -X POST "https://api.example.com/v1/checkout/6Kb3nM9m4jQv2XgD/pay" \
+  -H "Content-Type: application/json" \
+  --data '{"provider":"NOWPAYMENTS"}'
 ```
 
-### 5. NOWPayments IPN webhook
+### Read a merchant transaction
 
-**Method and path:** `POST /v1/provider-callbacks/nowpayments`
+**`GET /v1/transactions/:reference`**
 
-**Authentication:** **Not JWT-authenticated.** It is public and verified with NOWPayments IPN HMAC-SHA512 signing. The signature is carried in the `x-nowpayments-sig` header. The backend recursively sorts the parsed JSON keys, JSON-serializes that sorted object, and calculates HMAC-SHA512 using `NOWPAYMENTS_IPN_SECRET`. It does not validate the generic `x-provider-signature` or `x-provider-timestamp` headers on this route.
+- **Auth:** Merchant JWT required; the reference must belong to that merchant.
+- **Crypto response (`200 OK`):**
 
-**Request body:** The validated subset described in “WEBHOOK PAYLOAD REFERENCE” below.
+```json
+{
+  "publicReference": "sp_6f4894f6b4494cb49dc9a1f89ec7b264",
+  "paymentType": "CRYPTO",
+  "provider": "NOWPAYMENTS",
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75",
+  "status": "PROCESSING",
+  "description": "Order INV-2048",
+  "merchantReference": "INV-2048",
+  "createdAt": "2026-11-21T16:00:00.000Z",
+  "processedAt": null
+}
+```
 
-**Success response:**
+`404 Not Found` (`NotFoundException`) is returned if the transaction does not exist for the authenticated merchant. An invalid merchant JWT is rejected by the auth guard; a corrupt transaction without its matching payment detail results in `500 Internal Server Error` (`InternalServerErrorException`).
 
-New update:
+```bash
+curl "https://api.example.com/v1/transactions/sp_6f4894f6b4494cb49dc9a1f89ec7b264" \
+  -H "Authorization: Bearer $MERCHANT_JWT"
+```
+
+### Receive NOWPayments IPNs
+
+**`POST /v1/provider-callbacks/nowpayments`**
+
+- **Auth:** No JWT. The endpoint verifies the NOWPayments `x-nowpayments-sig` header using `NOWPAYMENTS_IPN_SECRET`.
+- **Request body:** See [Webhook payload reference](#3-webhook-payload-reference).
+- **Response (`200 OK`):**
 
 ```json
 {
@@ -300,148 +189,80 @@ New update:
 }
 ```
 
-Repeated/same-state update:
-
-```json
-{
-  "received": true,
-  "duplicate": true
-}
-```
-
-**Errors:**
-
-| Status | Exception | When |
-|---|---|---|
-| `400 Bad Request` | `BadRequestException` | Payload is missing required fields or is not one of the recognized status values, or `payment_id` is unknown |
-| `401 Unauthorized` | `UnauthorizedException` | `x-nowpayments-sig` is missing or HMAC verification fails |
-| `409 Conflict` | `ConflictException` | The payment belongs to another provider, a finished payment is replayed with a different `actually_paid`, a duplicate final update conflicts with stored state, or payment/attempt state changed concurrently |
-| `500 Internal Server Error` | `InternalServerErrorException` | Successful crypto posting has no immutable merchant snapshot or `actually_paid`, fee calculation is invalid, or the crypto ledger account/posting cannot be completed |
-
-The controller's signature check runs before payload-shape validation. Every signature-verified IPN that reaches `handleNowPaymentsCallback` is also recorded in `crypto_payment_ipn_events` before state reconciliation.
-
-**Curl:**
-
-To run this locally, replace `NOWPAYMENTS_IPN_SECRET` and the example values; the signature must be calculated over the recursively key-sorted JSON body:
+Repeated notifications may return `"duplicate": true`. Missing/invalid signatures return `401 Unauthorized` (`UnauthorizedException`); an invalid payload or unknown provider payment ID returns `400 Bad Request` (`BadRequestException`); conflicting state/provider/attempt relationships return `409 Conflict` (`ConflictException`). A finished status without any `actually_paid` value on record raises `500 Internal Server Error` (`InternalServerErrorException`) and the transaction update rolls back.
 
 ```bash
-PAYLOAD='{"payment_id":"5855453484","payment_status":"finished","actually_paid":12.345678,"pay_amount":12.4,"order_id":"0192b7c4-8d5a-7abc-b123-0123456789ab"}'
-SECRET='replace-with-your-ipn-secret'
-SIG=$(NOWPAYMENTS_IPN_SECRET="$SECRET" node -e "const crypto=require('crypto');const s=process.env.NOWPAYMENTS_IPN_SECRET;const p=JSON.parse(process.argv[1]);function sort(v){if(Array.isArray(v))return v.map(sort);if(v&&typeof v==='object')return Object.keys(v).sort().reduce((o,k)=>(o[k]=sort(v[k]),o),{});return v}process.stdout.write(crypto.createHmac('sha512',s).update(JSON.stringify(sort(p))).digest('hex'))" "$PAYLOAD")
-curl --fail-with-body \
-  -H 'Content-Type: application/json' \
-  -H "x-nowpayments-sig: $SIG" \
-  -d "$PAYLOAD" \
-  'http://localhost:3000/v1/provider-callbacks/nowpayments'
+curl -X POST "https://api.example.com/v1/provider-callbacks/nowpayments" \
+  -H "Content-Type: application/json" \
+  -H "x-nowpayments-sig: $VALID_IPN_SIGNATURE" \
+  --data '{
+    "payment_id": 123456789,
+    "payment_status": "finished",
+    "actually_paid": 25.75,
+    "pay_amount": 25.75,
+    "order_id": "d6cd7ed7-9967-4226-b245-73d2b63e65b3"
+  }'
 ```
 
-## WEBHOOK PAYLOAD REFERENCE
+For real use, NOWPayments sends this request. A manually replayed request must be signed using the NOWPayments IPN signing algorithm and the configured secret; an arbitrary signature will be rejected.
 
-The guard in [nowpayments-webhook-payload.guard.ts](../../src/payment-providers/adapters/nowpayments/nowpayments-webhook-payload.guard.ts) accepts only this subset:
+## 3. Webhook payload reference
 
-```json
-{
-  "payment_id": "5855453484",
-  "payment_status": "finished",
-  "actually_paid": 12.345678,
-  "pay_amount": 12.4,
-  "order_id": "0192b7c4-8d5a-7abc-b123-0123456789ab"
-}
-```
+The controller losslessly parses provider numeric fields before validating the payload. On the wire, `payment_id`, `actually_paid`, and `pay_amount` can be JSON numbers; the guard receives them as decimal strings to avoid JavaScript floating-point rounding.
 
-| Field | Required? | Type | Validation |
-|---|---|---|---|
-| `payment_id` | Yes | string | Non-empty; must equal a stored NOWPayments payment id |
-| `payment_status` | Yes | string | Must be one of `waiting`, `confirming`, `confirmed`, `sending`, `partially_paid`, `finished`, `failed`, `expired`, `refunded` |
-| `actually_paid` | No | number | Finite and greater than or equal to 0 when present |
-| `pay_amount` | No | number | Finite and greater than or equal to 0 when present |
-| `order_id` | No | string | No additional length or format validation |
+| Field | Required | Validated shape |
+|---|---:|---|
+| `payment_id` | Yes | Non-empty string after lossless parsing. |
+| `payment_status` | Yes | One of `waiting`, `confirming`, `confirmed`, `sending`, `partially_paid`, `finished`, `failed`, `expired`, `refunded`. |
+| `actually_paid` | No | Decimal string; exponent notation is accepted. |
+| `pay_amount` | No | Decimal string; exponent notation is accepted. |
+| `order_id` | No | String. |
 
-Unknown fields are ignored only at the guard-level object; the handler does not reconstruct or expose extra NOWPayments fields.
+Other fields that NOWPayments may send are not required by this payload guard. A status outside the allowlist is rejected as `400 Bad Request` before state mapping. The mapping is in [nowpayments-status.util.ts](../../src/payment-providers/adapters/nowpayments/nowpayments-status.util.ts).
 
-If `payment_status` is an unrecognized string, the webhook is rejected with `400 Bad Request` and `Unrecognized NOWPayments callback payload`. The supported-status set and field guard are in [nowpayments-webhook-payload.guard.ts](../../src/payment-providers/adapters/nowpayments/nowpayments-webhook-payload.guard.ts). Status behavior is decided in [nowpayments-status.util.ts](../../src/payment-providers/adapters/nowpayments/nowpayments-status.util.ts).
+## 4. Status lifecycle
 
-## STATUS LIFECYCLE
+### PaymentStatus
 
-For this provider, the status mapping is:
-
-| NOWPayments status | `PaymentStatus` | `PaymentAttemptStatus` | Meaning | Terminal? / transition behavior |
-|---|---|---|---|---|
-| `waiting` | `PROCESSING` | `PROCESSING` | Invoice awaiting a payment | No; can move to confirming, paid, failed, expired, or partial states |
-| `confirming` | `PROCESSING` | `PROCESSING` | Funds have arrived and are confirming | No; can move toward finished or another outcome |
-| `confirmed` | `PROCESSING` | `PROCESSING` | Payment is confirmed in NOWPayments | No; can move toward sending or finished |
-| `sending` | `PROCESSING` | `PROCESSING` | Funds are being sent or settled | No |
-| `partially_paid` | `PENDING_RECONCILIATION` | `UNKNOWN` | Customer sent less than the quoted amount; not a success and not automatically failed | No; remains available for reconciliation or later status updates |
-| `finished` | `SUCCEEDED` | `SUCCEEDED` | Payment completed; `actually_paid` is required before the crypto ledger can be posted | Yes; terminal success, and duplicate same-status callbacks return `duplicate: true` |
-| `failed` | `FAILED` | `FAILED` | NOWPayments reports a final failure | Yes |
-| `expired` | `FAILED` | `FAILED` | Invoice/payment window expired | Yes |
-| `refunded` | `PENDING_RECONCILIATION` | `UNKNOWN` | A refund or post-success reversal requires human/ledger review | Defined terminal by NOWPayments, but not a normal crypto success; no automatic reversal or success-to-failure rewrite occurs |
-
-Other internal values:
-
-| Status | Value used by this flow | Meaning |
+| Value | Meaning in this flow | Terminal? |
 |---|---|---|
-| `PaymentStatus.CREATED` | Before invoice initiation | Checkout exists but payment provider has not started |
-| `PaymentStatus.PROCESSING` | Invoice accepted or waiting/confirming/sending | Awaiting final customer/provider outcome |
-| `PaymentStatus.SUCCEEDED` | NOWPayments `finished` | Merchant crypto ledger posting completed in the callback/reconciliation transaction |
-| `PaymentStatus.FAILED` | NOWPayments `failed` or `expired`; or invoice rejected | No crypto ledger success posting |
-| `PaymentStatus.PENDING_RECONCILIATION` | `UNKNOWN` initiation, `partially_paid`, or `refunded` | Specifically for partial payment/refund-review or an unknown initiation/outcome; it is not a generic ambiguous dashboard state |
-| `PaymentAttemptStatus.STARTED` | Attempt row created before provider I/O | Claimed checkout, but provider response pending |
-| `PaymentAttemptStatus.PROCESSING` | Invoice accepted or in-progress NOWPayments status | Provider has work outstanding |
-| `PaymentAttemptStatus.SUCCEEDED` | NOWPayments `finished` | Terminal success |
-| `PaymentAttemptStatus.FAILED` | NOWPayments `failed`/`expired` or invoice rejection | Terminal failure |
-| `PaymentAttemptStatus.UNKNOWN` | Unknown invoice result, partial payment, or refund | Awaiting reconciliation/review |
+| `CREATED` | Crypto transaction and checkout exist; no provider attempt has started. | No; may become `PROCESSING`, `FAILED`, or `PENDING_RECONCILIATION`. |
+| `PROCESSING` | NOWPayments instructions were accepted or provider reports a non-final status (`waiting`, `confirming`, `confirmed`, `sending`). | No. |
+| `PENDING_RECONCILIATION` | Provider initiation outcome is ambiguous; NOWPayments reports `partially_paid`; or a pre-success `refunded` result needs manual resolution. | No; reconciliation may resolve it. |
+| `SUCCEEDED` | NOWPayments reports `finished`; actual received crypto is posted to the crypto ledger. | Yes; a later refund IPN is recorded but does not reverse state or ledger automatically. |
+| `FAILED` | Initiation was rejected, or NOWPayments reports `failed`/`expired`. | Yes. |
 
-Once `SUCCEEDED` or `FAILED`, the normal callback state machine refuses contradictory status changes. If NOWPayments sends `refunded` after `finished`, that status is not mapped back to `FAILED` or automatically reversed in the ledger. It is recorded and is left at `PENDING_RECONCILIATION` for review only if the guarded transaction permits it; the code does not currently perform a ledger reversal.
+### PaymentAttemptStatus
 
-## ENVIRONMENT / CONFIGURATION REQUIRED
+| Value | Meaning in this flow | Terminal? |
+|---|---|---|
+| `STARTED` | Provider call is in progress. | No. |
+| `PROCESSING` | Provider payment exists and is waiting for payment completion/status updates. | No. |
+| `UNKNOWN` | Initiation or provider outcome is ambiguous, including partial payment/refund cases. | No; reconciliation may resolve it. |
+| `SUCCEEDED` | NOWPayments reports `finished`. | Yes. |
+| `FAILED` | Provider creation was rejected or the payment reports `failed`/`expired`. | Yes. |
 
-### NOWPayments
+When a payment is `finished`, ledger posting uses `actually_paid`, not merely the requested amount; fee and merchant net are calculated in the original asset/network. A `refunded` IPN received after success is retained for manual handling without automatic ledger reversal.
 
-| Variable | Read from | Required? | Default / behavior |
-|---|---|---|---|
-| `NOWPAYMENTS_API_KEY` | `nowpayments.config.ts` | Production: required. Development/test: optional; reconciliation and API creation are unavailable or fail safely without it | No default |
-| `NOWPAYMENTS_IPN_SECRET` | `nowpayments.config.ts` and webhook controller | Production: required | No default |
-| `NOWPAYMENTS_BASE_URL` | `nowpayments.config.ts` | Optional | `https://api.nowpayments.io/v1` |
-| `PUBLIC_API_BASE_URL` | `nowpayments.config.ts` | Production: required and must start with `https://`. Development: optional; if absent, invoice initiation returns `CONFIG_MISSING` | No default |
-| `NOWPAYMENTS_PRICE_CURRENCY` | `nowpayments.config.ts` | Optional | `usd`; NOWPayments does not receive MWK as `price_currency` |
-| `NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS` | `nowpayments.config.ts` | Optional | `300` |
-| `NOWPAYMENTS_FEE_BPS` | `nowpayments.config.ts` | Optional | `0`; integer 0 through 9999, where 100 bps = 1%. The code rejects any other value at config load |
+## 5. Environment and configuration
 
-Sandbox uses `https://api-sandbox.nowpayments.io/v1`; production uses `https://api.nowpayments.io/v1`. Sandbox and production require separate API keys and IPN secrets.
+| Variable | Required/default | Purpose |
+|---|---|---|
+| `NOWPAYMENTS_API_KEY` | Required in production; no default. | Authenticates outbound estimate, create-payment, and status requests. Missing keys outside production allow startup but prevent successful provider calls. |
+| `NOWPAYMENTS_IPN_SECRET` | Required in production; no default. | Verifies the `x-nowpayments-sig` IPN header. Missing secret causes IPN rejection. |
+| `NOWPAYMENTS_BASE_URL` | Defaults to `https://api.nowpayments.io/v1`. | NOWPayments API base; use the documented sandbox base for sandbox testing. |
+| `PUBLIC_API_BASE_URL` | Required in production; no default. | Public backend base embedded in the IPN callback URL. Production requires HTTPS. |
+| `NOWPAYMENTS_FEE_BPS` | Defaults to `0`. | Crypto fee in basis points; must be an integer from `0` through `9999`. |
+| `CHECKOUT_BASE_URL` | No default. | Base for generated hosted checkout URLs; must be configured as a valid HTTPS URL, except localhost is permitted for development. |
+| `NODE_ENV` | Environment-provided. | In `production`, startup fails if the API key, IPN secret, or public HTTPS callback URL is missing. |
 
-In production, `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET`, and a public HTTPS `PUBLIC_API_BASE_URL` fail at application boot. Outside production, missing values do not necessarily fail boot, but NOWPayments initiation and reconciliation behave accordingly.
+The required USD price reference is obtained from NOWPayments at initiation and is not controlled by an additional FX environment variable. `NOWPAYMENTS_FEE_BPS` affects crypto ledger fee/net only.
 
-### FX quote
+## 6. Known limitations
 
-| Variable | Read from | Required? | Default / behavior |
-|---|---|---|---|
-| `FX_RATE_API_BASE_URL` | `fx.config.ts` | Optional | `https://open.er-api.com/v6/latest` |
-| `FX_RATE_POLL_INTERVAL_MS` | `fx.config.ts` | Optional | `15000` milliseconds |
-
-The provider requests `${FX_RATE_API_BASE_URL}/MWK`, caches the target-currency rate, and accepts a quote for NOWPayments only if its capture age is within `NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS`. The upstream source republishes daily, so the poll interval only improves cache outage detection; it does not create fresher exchange-rate data.
-
-### Hosted checkout and API authentication
-
-| Variable | Read from | Required? | Default / behavior |
-|---|---|---|---|
-| `CHECKOUT_BASE_URL` | `TransactionsService` | Required for successful checkout URL creation | No default; must be an HTTPS URL or `http://localhost`, with no query or fragment |
-| `JWT_SECRET` | Merchant JWT strategy | Required; merchant create/status endpoints fail authentication setup without it | No default |
-| `DATABASE_URL` | `DatabaseService` | Required | No default |
-| `NODE_ENV` | NOWPayments config and several guards | Optional for general config | No default in config itself; set to `production` for production fail-fast behavior and to disable the test provider |
-| `PORT` | `main.ts` | Optional | `3000` |
-| `FRONTEND_URL` | `main.ts` | Optional CORS origin | `http://localhost:5173` |
-| `ARCJET_KEY` | Arcjet module | Required for Arcjet-protected checkout and merchant transaction routes where Arcjet is enabled | No default |
-| `ARCJET_ENV` | Arcjet module | Optional | `.env.example` uses `development` |
-
-The NOWPayments webhook itself does not read `SIGNING_SECRET`; that variable belongs to the separate generic provider-callback route.
-
-## KNOWN LIMITATIONS
-
-- **Missing-IPN reconciliation exists.** `NowPaymentsReconciliationService` runs immediately at module initialization and every 60,000 ms (60 seconds) while `NOWPAYMENTS_API_KEY` is configured. It queries at most 50 stale crypto payment detail rows, where `updatedAt` is at least 5 minutes old and the attempt/transaction is still processing or reconciliation-pending. It calls `GET /payment/{payment_id}` on NOWPayments and feeds accepted responses through the same guarded callback state path. It is process-local polling, not a durable distributed job, and successful/failed/refunded detail rows are generally excluded through the candidate rules.
-- **Crypto payouts are not implemented.** The current code can credit crypto balances, but it has no payout or withdrawal endpoint or flow. Do not present a crypto balance as withdrawable yet.
-- **Currency mapping is hand-maintained.** [crypto-asset.util.ts](../../src/ledger/crypto-asset.util.ts) maps known tickers such as `usdttrc20`, `usdterc20`, `btc`, and `eth` to asset/network ledger dimensions. It is not an exhaustive NOWPayments currency list. Unknown tickers fall back to the uppercase raw ticker with no network. Check NOWPayments' `GET /v1/full-currencies` or `GET /v1/currencies` and update the table before enabling a new or unfamiliar ticker.
-- **Crypto fee default is zero.** `NOWPAYMENTS_FEE_BPS` defaults to `0` in code and in `.env.example`. With 0 bps, the merchant crypto ledger receives the full NOWPayments `actually_paid` amount. A non-zero approved value subtracts `feeAmount = actuallyPaid * feeBps / 10000`; the remainder is credited to the merchant, and the remainder beyond it is posted to platform crypto fee revenue.
-- **There is no crypto-balance HTTP dashboard endpoint.** Balances exist in `crypto_ledger_accounts` and `crypto_ledger_account_balances`, keyed by merchant, asset, and network. This backend does not currently expose a GET route for that balance. A frontend or backend dashboard must wait for an endpoint that explicitly reads that ledger projection; polling `GET /v1/transactions/:reference` only gives transaction status and MWK transaction fields.
-- **MWK is not a crypto-credit unit.** Successful crypto posting creates debit/credit crypto ledger entries for the paid asset and does not post the MWK `amountTambala` to the merchant crypto balance.
-- **Database migrations must be applied to the same database the app uses.** `prisma generate` only generates the client; it does not create database tables. Production startup through `npm run start:prod` runs `prisma migrate deploy` before starting Nest. If a deployment starts the app another way, run `npx prisma migrate deploy --config prisma7.config.ts` as a release step against that deployment's `DATABASE_URL`. Use `migrate deploy` in production, not `migrate dev`. A `P2021` / “table does not exist” message for `crypto_payment_details` means the crypto-payment migration has not been applied to that database.
+- **Stale/missing webhook reconciliation exists.** It runs immediately at startup and every 60 seconds when an API key is configured; it checks payments stale for at least 5 minutes, at most 50 per run. It is process-local, not a distributed scheduler.
+- **Merchant crypto payouts are not implemented.** Crypto balances can be credited but cannot yet be withdrawn through this backend.
+- **Ticker mapping is hand-maintained and intentionally incomplete.** Update [crypto-asset.util.ts](../../src/ledger/crypto-asset.util.ts) before enabling a new asset/network pair. The code does not automatically ingest NOWPayments' currency list.
+- **Current crypto fee is 0 bps by default.** Set `NOWPAYMENTS_FEE_BPS` only to an approved value.
+- **Provider API behavior needs sandbox validation.** The USD reference estimate is requested from NOWPayments because its create-payment API requires fiat `price_amount`; the exact requested crypto amount is sent separately as `pay_amount`.
+- **Partial payments and refunds need an operational policy.** Partial payments enter pending reconciliation. A refund after success is retained for manual action; automatic reversals are not implemented.

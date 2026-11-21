@@ -43,7 +43,7 @@ describe('NowPaymentsReconciliationService', () => {
     const response = {
       payment_id: 'np-payment-1',
       payment_status: 'finished',
-      actually_paid: 0.00012,
+      actually_paid: '0.00012',
     };
     database.cryptoPaymentDetail.findMany.mockResolvedValue([candidate]);
     database.cryptoPaymentDetail.update.mockResolvedValue(candidate);

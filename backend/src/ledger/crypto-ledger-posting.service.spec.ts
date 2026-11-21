@@ -37,21 +37,28 @@ describe('CryptoLedgerPostingService', () => {
     const tx = createTransactionClient();
     const service = new CryptoLedgerPostingService();
 
-    await service.postSuccessfulCryptoPayment(
+    const posting = await service.postSuccessfulCryptoPayment(
       tx as unknown as Prisma.TransactionClient,
       {
         paymentId: 'payment-1',
         publicReference: 'public-1',
         merchantId: 'merchant-1',
         provider: PaymentProvider.NOWPAYMENTS,
-        payCurrency: 'btc',
+        asset: 'BTC',
+        network: null,
         actuallyPaidAmount: '0.00012',
         feeBps: 250,
       },
     );
 
-    const entries = tx.cryptoLedgerEntry.createMany.mock.calls[0][0].data;
+    const entries = tx.cryptoLedgerEntry.createMany.mock.calls[0][0]
+      .data as Array<{
+      direction: LedgerEntryDirection;
+      amount: { toString(): string };
+    }>;
     expect(entries).toHaveLength(3);
+    expect(posting.feeAmount.toString()).toBe('0.000003');
+    expect(posting.merchantNetAmount.toString()).toBe('0.000117');
     expect(
       entries.map((entry) => [entry.direction, entry.amount.toString()]),
     ).toEqual([
@@ -72,13 +79,18 @@ describe('CryptoLedgerPostingService', () => {
         publicReference: 'public-2',
         merchantId: 'merchant-1',
         provider: PaymentProvider.NOWPAYMENTS,
-        payCurrency: 'btc',
+        asset: 'BTC',
+        network: null,
         actuallyPaidAmount: '0.00012',
         feeBps: 0,
       },
     );
 
-    const entries = tx.cryptoLedgerEntry.createMany.mock.calls[0][0].data;
+    const entries = tx.cryptoLedgerEntry.createMany.mock.calls[0][0]
+      .data as Array<{
+      direction: LedgerEntryDirection;
+      amount: { toString(): string };
+    }>;
     expect(entries).toHaveLength(2);
     expect(
       entries.map((entry) => [entry.direction, entry.amount.toString()]),
