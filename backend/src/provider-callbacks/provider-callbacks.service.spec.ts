@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHmac } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Test, type TestingModule } from '@nestjs/testing';
@@ -9,6 +10,7 @@ import {
   PaymentStatus,
 } from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
+import { CryptoLedgerPostingService } from '../ledger/crypto-ledger-posting.service.js';
 import { LedgerPostingService } from '../ledger/ledger-posting.service.js';
 import { ProviderCallbackStatus } from './dto/provider-callback.dto.js';
 import { ProviderCallbacksService } from './provider-callbacks.service.js';
@@ -18,13 +20,33 @@ describe('ProviderCallbacksService', () => {
 
   const databaseService = {
     $transaction: vi.fn(),
+    cryptoPaymentDetail: {
+      findUnique: vi.fn(),
+    },
+    cryptoPaymentIpnEvent: {
+      create: vi.fn(),
+    },
   };
 
   const ledgerPostingService = {
     postSuccessfulPayment: vi.fn(),
   };
 
+  const cryptoLedgerPostingService = {
+    postSuccessfulCryptoPayment: vi.fn(),
+  };
+
+  const configService = {
+    getOrThrow: vi.fn((key: string) =>
+      key === 'nowpayments.cryptoFeeBps' ? 250 : undefined,
+    ),
+  };
+
   const transactionClient = {
+    cryptoPaymentDetail: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
     paymentAttempt: {
       findUnique: vi.fn(),
       updateMany: vi.fn(),
@@ -61,6 +83,14 @@ describe('ProviderCallbacksService', () => {
         {
           provide: DatabaseService,
           useValue: databaseService,
+        },
+        {
+          provide: CryptoLedgerPostingService,
+          useValue: cryptoLedgerPostingService,
+        },
+        {
+          provide: ConfigService,
+          useValue: configService,
         },
       ],
     }).compile();
@@ -491,5 +521,60 @@ describe('ProviderCallbacksService', () => {
         signature,
       }),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('uses the configured NOWPayments fee and records the actual paid amount', async () => {
+    const detail = {
+      id: 'crypto-detail-1',
+      payCurrency: 'btc',
+      actuallyPaidAmount: null,
+      attempt: {
+        id: 'crypto-attempt-1',
+        status: PaymentAttemptStatus.PROCESSING,
+        providerReference: 'np-payment-1',
+        transaction: {
+          id: 'crypto-transaction-1',
+          publicReference: 'crypto-ref-1',
+          merchantId: 'merchant-1',
+          provider: PaymentProvider.NOWPAYMENTS,
+          status: PaymentStatus.PROCESSING,
+          merchantNetTambala: 1_000_000n,
+        },
+      },
+    };
+    const payload = {
+      payment_id: 'np-payment-1',
+      payment_status: 'finished' as const,
+      actually_paid: 0.00012,
+    };
+    databaseService.cryptoPaymentDetail.findUnique.mockResolvedValue(detail);
+    databaseService.cryptoPaymentIpnEvent.create.mockResolvedValue({});
+    transactionClient.cryptoPaymentDetail.findUnique.mockResolvedValue(detail);
+    transactionClient.cryptoPaymentDetail.update.mockResolvedValue({});
+    transactionClient.paymentAttempt.updateMany.mockResolvedValue({ count: 1 });
+    transactionClient.paymentTransaction.updateMany.mockResolvedValue({ count: 1 });
+    cryptoLedgerPostingService.postSuccessfulCryptoPayment.mockResolvedValue({});
+
+    await expect(service.handleNowPaymentsCallback(payload)).resolves.toEqual({
+      received: true,
+      duplicate: false,
+    });
+
+    expect(cryptoLedgerPostingService.postSuccessfulCryptoPayment).toHaveBeenCalledWith(
+      transactionClient,
+      expect.objectContaining({
+        paymentId: 'crypto-transaction-1',
+        actuallyPaidAmount: 0.00012,
+        feeBps: 250,
+      }),
+    );
+    expect(transactionClient.cryptoPaymentDetail.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lastReportedStatus: 'finished',
+          actuallyPaidAmount: 0.00012,
+        }),
+      }),
+    );
   });
 });

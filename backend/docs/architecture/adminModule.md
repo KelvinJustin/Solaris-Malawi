@@ -26,9 +26,9 @@ The module is implemented using NestJS and Prisma, with PostgreSQL as the databa
 | `src/admin/admin.controller.spec.ts` | Tests controller behavior, if present. |
 | `src/admin/admin.module.ts` | Registers the admin controller, service, and imports StorageModule. |
 | `src/storage/r2-storage.service.ts` | Provides pre-signed S3 download URLs for secure document inspection. |
-| `src/admin-auth/admin-jwt-auth.guard.ts` | Protects routes using admin authentication. |
-| `src/admin-auth/admin-roles.guard.ts` | Enforces route-level admin role restrictions. |
-| `src/admin-auth/admin-roles.decorator.ts` | Declares which admin roles may access a route. |
+| `src/auth/admin-auth/jwt/admin-jwt-auth.guard.ts` | Protects routes using admin authentication. |
+| `src/auth/admin-auth/admin-roles.guard.ts` | Enforces route-level admin role restrictions. |
+| `src/auth/admin-auth/admin-roles.decorator.ts` | Declares which admin roles may access a route. |
 | `src/merchants/document-requirements.ts` | Defines required and optional KYC documents for each business type. |
 
 ---
@@ -52,7 +52,7 @@ Other roles, including `OPERATIONS` and `SUPPORT`, are not authorized to use the
 
 The authenticated administrator's identity is obtained from `request.user`, populated by the authentication guard. The admin ID is passed to the service for audit-history recording rather than accepted from the client request body.
 
-Admin authentication is separate from merchant authentication.
+Admin authentication is separate from merchant authentication. Both auth features live under `src/auth/`: admin files are in `admin-auth/`, while merchant files are in `merchant-auth/`. This source layout does not change the `/v1/admin-auth` or `/v1/auth` route prefixes.
 
 ---
 
@@ -381,7 +381,7 @@ The controller validates the reason's type before calling the service, which tri
 
 **Purpose**
 
-Generates a secure, short-lived (5-minute) pre-signed download and preview URL for an uploaded merchant KYC document stored in Cloudflare R2. This allows compliance reviewers to inspect document images and PDFs directly in the browser without exposing the private storage bucket publicly.
+Generates a secure, short-lived (5-minute) pre-signed download and preview URL for an uploaded merchant KYC document in the configured S3-compatible storage (MinIO locally; Cloudflare R2 in production). This allows compliance reviewers to inspect document images and PDFs directly in the browser without exposing the private storage bucket publicly.
 
 **Allowed roles**
 
@@ -563,7 +563,7 @@ The list currently includes applications in `SUBMITTED` and `UNDER_REVIEW` state
 - [x] Start-review endpoint.
 - [x] Approval endpoint.
 - [x] Rejection endpoint with a required reason.
-- [x] KYC document inspection and pre-signed preview URL generation via Cloudflare R2.
+- [x] KYC document inspection and pre-signed preview URL generation via configured object storage.
 - [x] Role restrictions on application review endpoints.
 - [x] Status-transition validation.
 - [x] Document validation during approval.
@@ -626,4 +626,4 @@ Passing unit tests and a successful build provide confidence in the implementati
 
 All endpoints are protected by admin authentication and role guards. Application review actions are restricted to `SUPER_ADMIN` and `COMPLIANCE` under the current controller configuration.
 
-**Summary:** The Admin module implements the merchant application review lifecycle from retrieving submitted applications, inspecting uploaded KYC documents via secure Cloudflare R2 pre-signed URLs, through approval or rejection. It combines role-based access control, KYC document validation, conditional status transitions, and transactional audit-history recording.
+**Summary:** The Admin module implements the merchant application review lifecycle from retrieving submitted applications, inspecting uploaded KYC documents via secure object-storage pre-signed URLs, through approval or rejection. It combines role-based access control, KYC document validation, conditional status transitions, and transactional audit-history recording.

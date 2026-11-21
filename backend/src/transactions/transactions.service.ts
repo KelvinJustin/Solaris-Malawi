@@ -631,7 +631,7 @@ export class TransactionsService {
    * For mobile money this callback is the provider's synchronous HTTP
    * response. For crypto it is still just the "invoice created" response —
    * ACCEPTED here means PROCESSING, not SUCCEEDED. The NOWPayments webhook
-   * handler (nowpayments-webhook.service.ts) is what later moves a crypto
+   * handler in provider-callbacks is what later moves a crypto
    * transaction from PROCESSING to SUCCEEDED/FAILED, using this exact same
    * guarded-update idiom so the two can never race each other into a bad
    * state.

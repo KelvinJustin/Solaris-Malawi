@@ -79,7 +79,7 @@ export class NowPaymentsProviderAdapter implements PaymentProviderAdapter {
         payCurrency: input.payCurrency,
         orderId: input.attemptReference, // PaymentAttempt rows are never reused — safe as a NOWPayments idempotency key
         orderDescription: `Solaris payment ${input.transactionReference}`,
-        ipnCallbackUrl: `${versionedApiBaseUrl}/webhooks/nowpayments`,
+        ipnCallbackUrl: `${versionedApiBaseUrl}/provider-callbacks/nowpayments`,
       });
     } catch {
       return {

@@ -4,7 +4,7 @@
 
 This document describes how the backend test suite is structured, what is being validated, and which edge cases are intentionally covered. It is meant to be the operational reference for backend developers working in this repository, not a placeholder README.
 
-The backend uses Vitest with NestJS testing utilities. The suite is designed to validate application behavior under mocked dependencies rather than to exercise a live database, SMTP server, or Redis instance.
+The backend uses Vitest with NestJS testing utilities. The unit suite validates application behavior under mocked dependencies rather than contacting live providers or SMTP. Redis is not currently used by backend source. A separate PostgreSQL integration suite exercises database-backed ledger, settlement, and NOWPayments behavior against a dedicated local test database.
 
 ---
 
@@ -19,7 +19,7 @@ npm test -- --run
 To run a single spec file:
 
 ```bash
-npx vitest run src/auth/auth.service.spec.ts
+npx vitest run src/auth/merchant-auth/auth.service.spec.ts
 ```
 
 To run a subset of matching specs:
@@ -60,7 +60,7 @@ The backend test suite currently covers the following files and responsibilities
 
 ### Authentication and authorization
 
-#### `src/auth/auth.service.spec.ts`
+#### `src/auth/merchant-auth/auth.service.spec.ts`
 Covers merchant authentication and account lifecycle flows:
 
 - registration with duplicate email/phone rejection
@@ -72,7 +72,7 @@ Covers merchant authentication and account lifecycle flows:
 - soft-delete account handling
 - transaction-aware behavior for registration and account deletion
 
-#### `src/auth/auth.controller.spec.ts`
+#### `src/auth/merchant-auth/auth.controller.spec.ts`
 Covers request/response behavior for auth endpoints:
 
 - login request forwarding
@@ -80,7 +80,7 @@ Covers request/response behavior for auth endpoints:
 - verification request shapes
 - error propagation from service to HTTP layer
 
-#### `src/admin-auth/admin-auth.service.spec.ts`
+#### `src/auth/admin-auth/admin-auth.service.spec.ts`
 Covers admin authentication domain:
 
 - valid admin login with JWT creation
@@ -89,7 +89,7 @@ Covers admin authentication domain:
 - JWT signing errors
 - logout token revocation behavior
 
-#### `src/admin-auth/admin-auth.controller.spec.ts`
+#### `src/auth/admin-auth/admin-auth.controller.spec.ts`
 Covers admin cookie/session contract and controller delegation:
 
 - login sets `admin_access_token`
@@ -143,6 +143,26 @@ This is the security-critical callback suite. It covers:
 - malformed amount values that cannot be represented in tambala
 - mismatch between stored transaction/provider metadata and callback data
 - provider state transitions and payment transaction finalization logic
+
+### FX and NOWPayments
+
+The NOWPayments tests are under `src/payment-providers/adapters/nowpayments/`; `src/fx/fx-rate.provider.spec.ts` covers FX quote caching and refresh behavior. They cover:
+
+- provider API request formatting and HTTP/network error handling
+- conversion and persistence of crypto payment instructions and the FX snapshot
+- rejection of stale local quotes and missing callback URL configuration
+- IPN signature verification and provider-to-internal status mapping
+- webhook state transitions, duplicate/finalized events, and ledger posting
+
+These are mocked unit tests. They do not contact NOWPayments or prove a live sandbox transaction or public IPN delivery.
+
+The PostgreSQL integration suite also includes `src/provider-callbacks/provider-callbacks.postgres-spec.ts` to exercise duplicate finished IPNs, crypto-fee posting, and rollback when crypto ledger posting fails. It runs with the other ledger and settlement integration specs:
+
+```bash
+npm run test:ledger:integration
+```
+
+Configure Prisma to use a dedicated local PostgreSQL test database before running this suite. Never run these integration tests against a development or production database. The suite does not require Docker when the local PostgreSQL service is available.
 
 #### `src/provider-callbacks/provider-callbacks.controller.spec.ts`
 Covers controller validation and delegation for callback endpoints.
@@ -233,12 +253,14 @@ This keeps the tests precise without depending on internal implementation detail
 
 ## 6. What the current suite is not
 
-This is not a full end-to-end application test suite. It intentionally does not cover:
+This is not a full end-to-end application test suite. The dedicated PostgreSQL suite covers payment capture, settlement, and NOWPayments persistence/transaction boundaries, but the project does not claim:
 
-- real PostgreSQL migrations or database integration
+- PostgreSQL integration coverage for every feature or every migration edge case
 - live SMTP delivery in a real environment
 - real external payment provider networking
-- Redis-backed session orchestration in production-like conditions
+- live NOWPayments sandbox transactions or inbound public IPN reachability
+- whether an FX source's upstream publication timestamp meets business freshness requirements
+- Redis-backed application workflows (the current backend source does not use Redis)
 - UI flows
 
 The goal is to provide strong contract-level validation of the backend’s business logic and edge cases while keeping tests deterministic and fast.

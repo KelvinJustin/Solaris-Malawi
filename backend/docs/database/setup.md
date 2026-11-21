@@ -42,7 +42,7 @@ The repo includes the example values in `.env.example`. Do not commit real crede
 
 ## 3. Prisma schema and generated client
 
-The schema defines the current business models for merchant onboarding, document review, admin accounts, and payment lifecycle state.
+The schema defines the current business models for merchant onboarding, document review, admin accounts, payment lifecycle state, crypto payments, and provider settlement reconciliation.
 
 The generator is configured as:
 
@@ -111,8 +111,10 @@ The existing schema includes models for:
 - `MerchantLedger` (legacy balances retained for reconciliation)
 - `FeePolicy` and `FeePolicyAuditEvent`
 - `LedgerAccount`, `LedgerTransaction`, `LedgerEntry`, and `LedgerAccountBalance`
+- Crypto payment details and IPN event history
+- Provider settlement batches/items, normalized imports, bank statement lines, allocations, approvals, and audit events
 
-The financial/payment part of the schema is active. Payment fees are snapshotted at creation, and successful verified provider callbacks post to the ledger in the same database transaction as payment and attempt updates. See the [ledger module guide](../architecture/ledgerModule.md) for accounting behavior and historical cutover precautions.
+The financial/payment part of the schema is active. Payment fees are snapshotted at creation, and successful verified provider events post to the ledger in the same database transaction as payment and attempt updates. Settlement reconciliation separately supports normalized imports and controlled approval/posting against bank-credit evidence. Provider- and bank-specific parsers and merchant fund release are not implemented. See the [ledger module guide](../architecture/ledgerModule.md) for accounting behavior and historical cutover precautions.
 
 ## 7. Database validation and maintenance
 
@@ -128,6 +130,6 @@ The app expects a working PostgreSQL database before it can initialize. The `Dat
 
 ## 8. Local development note
 
-The Docker Compose setup in this repository does not include a PostgreSQL container. The app still depends on a reachable database via `DATABASE_URL` while Redis is started by Docker Compose.
+The Docker Compose setup in this repository does not include a PostgreSQL container. The app depends on a reachable database via `DATABASE_URL`. Compose starts Redis, but the current backend source does not use it.
 
 This is intentional and should be reflected in local setup instructions.

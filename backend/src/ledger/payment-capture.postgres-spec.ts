@@ -1,5 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ConfigService } from '@nestjs/config';
 import {
   FeeType,
   LedgerAccountStatus,
@@ -12,6 +13,7 @@ import {
 import { DatabaseService } from '../database/database.service.js';
 import { createFeePolicyVersion } from './fee-policy-management.js';
 import { FeePolicyService } from './fee-policy.service.js';
+import { CryptoLedgerPostingService } from './crypto-ledger-posting.service.js';
 import { LedgerPostingService } from './ledger-posting.service.js';
 import { ProviderCallbackStatus } from '../provider-callbacks/dto/provider-callback.dto.js';
 import { ProviderCallbacksService } from '../provider-callbacks/provider-callbacks.service.js';
@@ -90,6 +92,8 @@ describe('payment capture PostgreSQL integration', () => {
     callbacks = new ProviderCallbacksService(
       database,
       new LedgerPostingService(),
+      new CryptoLedgerPostingService(),
+      new ConfigService({ NOWPAYMENTS_FEE_BPS: 0 }),
     );
   });
 

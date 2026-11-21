@@ -914,3 +914,79 @@ model CryptoPaymentIpnEvent {
   @@index([cryptoPaymentDetailId, receivedAt])
   @@map("crypto_payment_ipn_events")
 }
+
+model CryptoLedgerAccount {
+  id            String              @id @default(uuid()) @db.Uuid
+  key           String              @unique
+  code          String              // MERCHANT_CRYPTO_BALANCE | PROVIDER_CRYPTO_CLEARING | PLATFORM_CRYPTO_FEE_REVENUE
+  name          String
+  type          LedgerAccountType
+  normalBalance LedgerNormalBalance
+  status        LedgerAccountStatus @default(ACTIVE)
+
+  // Asset and network are deliberately separate fields, not one combined
+  // string — USDT-TRC20 and USDT-ERC20 must never collide into the same
+  // spendable balance, but both still need to be queryable by asset alone
+  // for a merchant's "what do I hold" dashboard view.
+  asset   String // e.g. "USDT", "BTC" — always uppercase
+  network String? // e.g. "TRC20", "ERC20" — null for assets with no network variants (BTC)
+
+  merchantId String?          @db.Uuid
+  provider   PaymentProvider? // set only on PROVIDER_CRYPTO_CLEARING accounts
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries CryptoLedgerEntry[]
+  balance CryptoLedgerAccountBalance?
+
+  @@index([merchantId, asset, network])
+  @@index([provider, asset, network])
+  @@map("crypto_ledger_accounts")
+}
+
+model CryptoLedgerAccountBalance {
+  id          String   @id @default(uuid()) @db.Uuid
+  accountId   String   @unique @db.Uuid
+  debitTotal  Decimal  @default(0) @db.Decimal(36, 18)
+  creditTotal Decimal  @default(0) @db.Decimal(36, 18)
+  updatedAt   DateTime @updatedAt
+
+  account CryptoLedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@map("crypto_ledger_account_balances")
+}
+
+model CryptoLedgerTransaction {
+  id             String                  @id @default(uuid()) @db.Uuid
+  reference      String                  @unique
+  sourceType     String
+  sourceId       String
+  postingPurpose String
+  status         LedgerTransactionStatus @default(PENDING)
+  description    String?
+  provenance     String?
+  createdAt      DateTime                @default(now())
+  postedAt       DateTime?
+
+  entries CryptoLedgerEntry[]
+
+  @@unique([sourceType, sourceId, postingPurpose])
+  @@map("crypto_ledger_transactions")
+}
+
+model CryptoLedgerEntry {
+  id                        String               @id @default(uuid()) @db.Uuid
+  cryptoLedgerTransactionId String               @db.Uuid
+  accountId                 String               @db.Uuid
+  direction                 LedgerEntryDirection
+  amount                    Decimal              @db.Decimal(36, 18)
+  createdAt                 DateTime             @default(now())
+
+  ledgerTransaction CryptoLedgerTransaction @relation(fields: [cryptoLedgerTransactionId], references: [id], onDelete: Restrict)
+  account           CryptoLedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, createdAt])
+  @@index([cryptoLedgerTransactionId])
+  @@map("crypto_ledger_entries")
+}

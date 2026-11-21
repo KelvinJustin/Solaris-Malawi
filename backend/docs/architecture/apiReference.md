@@ -8,6 +8,7 @@ Unless a route is explicitly public, a valid authentication cookie or JWT-bearin
 
 | Module | Method | Endpoint | Auth | Request contract | Primary response |
 |---|---|---|---|---|---|
+| App | `GET` | `/v1/test` | Public | none | simple API-running message; not a dependency readiness check |
 | Auth | `POST` | `/v1/auth/register` | Public | `name`, `email`, `password`, `phone` | `201` with verification email status |
 | Auth | `POST` | `/v1/auth/login` | Public | `email`, `password` | `201` with OTP email status |
 | Auth | `POST` | `/v1/auth/verify-login` | Public | `email`, `code` | sets `access_token` cookie, returns redirect payload |
@@ -34,8 +35,15 @@ Unless a route is explicitly public, a valid authentication cookie or JWT-bearin
 | Transactions | `POST` | `/v1/transactions` | Required | `amountTambala`, optional `customerPhone`, `description`, `merchantReference` | payment session creation |
 | Transactions | `GET` | `/v1/transactions/:reference` | Required | path param `reference` | transaction details |
 | Checkout | `GET` | `/v1/checkout/:token` | Public | path param `token` | public checkout session metadata |
-| Checkout | `POST` | `/v1/checkout/:token/pay` | Public | JSON `provider`, `phoneNumber` | provider payment initiation |
+| Checkout | `POST` | `/v1/checkout/:token/pay` | Public | Mobile money: `provider`, `phoneNumber`; NOWPayments: `provider`, `payCurrency`, optional `network` | provider payment initiation; crypto success includes payment instructions |
 | Provider callbacks | `POST` | `/v1/provider-callbacks` | Public, signed | raw JSON body + callback headers | callback acknowledgement |
+| NOWPayments | `POST` | `/v1/provider-callbacks/nowpayments` | Public, signed | NOWPayments IPN body + `x-nowpayments-sig` | IPN acknowledgement |
+| Settlements | `POST` | `/v1/admin/settlements/provider-imports/normalized` | Admin `OPERATIONS` | normalized provider batch | imported batch |
+| Settlements | `POST` | `/v1/admin/settlements/bank-statements/normalized` | Admin `OPERATIONS` | normalized bank statement | imported statement |
+| Settlements | `POST` | `/v1/admin/settlements/:batchId/reconcile` | Admin `OPERATIONS` | batch identifier | reconciliation result |
+| Settlements | `POST` | `/v1/admin/settlements/allocations` | Admin `OPERATIONS` | allocation request | allocation result |
+| Settlements | `POST` | `/v1/admin/settlements/:batchId/approve` | Admin `SUPER_ADMIN` | batch identifier | approval result |
+| Settlements | `POST` | `/v1/admin/settlements/:batchId/post` | Admin `SUPER_ADMIN` | batch identifier | posting result |
 
 ## 2. Related documents
 
@@ -44,13 +52,14 @@ Unless a route is explicitly public, a valid authentication cookie or JWT-bearin
 - [adminModule.md](./adminModule.md)
 - [merchantModule.md](./merchantModule.md)
 - [transactionsModule.md](./transactionsModule.md)
+- [nowpaymentsAdapter.md](./nowpaymentsAdapter.md)
 - [overview.md](./overview.md)
 
 ## 3. API conventions
 
 - JSON payloads are validated by NestJS `ValidationPipe` with `whitelist` and `forbidNonWhitelisted` enabled.
 - Request bodies must match the DTO field names exactly.
-- For public callback endpoints, the request body is examined as raw bytes because the signature is computed against the exact payload.
+- Provider callback endpoints have provider-specific signature contracts. The generic provider callback verifies its raw-body signature; NOWPayments verifies its `x-nowpayments-sig` IPN signature before processing the payload.
 - Public checkout links are short-lived and expire after 30 minutes by default.
 - Amounts in payment APIs are expressed in tambala for internal storage, while provider callbacks send `MWK` values in decimal form and are converted to tambala before validation.
 
@@ -60,3 +69,5 @@ Unless a route is explicitly public, a valid authentication cookie or JWT-bearin
 - All auth cookies are `HttpOnly` and should not be read from JavaScript.
 - The transaction creation flow is idempotent only when the same `Idempotency-Key` header is reused with identical payload data.
 - Callback providers must send `x-provider-timestamp` and `x-provider-signature`; the server rejects stale or invalid signatures.
+- NOWPayments checkout requires a `payCurrency`; accepted initiation returns payment instructions but does not mean payment has completed. See [nowpaymentsAdapter.md](./nowpaymentsAdapter.md) for the IPN lifecycle and readiness limits.
+- Settlement import/reconciliation endpoints accept normalized data only. Provider- and bank-specific parsers are not included until documented formats and sanitized samples are available. Operations users import/reconcile/allocate; super admins approve/post.

@@ -89,7 +89,8 @@ describe('NowPaymentsProviderAdapter', () => {
         payCurrency: 'btc',
         orderId: 'attempt-1',
         orderDescription: 'Solaris payment solaris-ref-1',
-        ipnCallbackUrl: 'https://api.solaris.example/v1/webhooks/nowpayments',
+        ipnCallbackUrl:
+          'https://api.solaris.example/v1/provider-callbacks/nowpayments',
       },
     ]);
     expect(createCryptoPaymentDetail.mock.calls).toContainEqual([

@@ -14,15 +14,19 @@ The **Solaris Malawi Backend** is a NestJS 12 modular monolith providing a payme
 
 ### Implemented
 - **Merchant Auth:** Registration, HMAC-based OTP verification, 2FA login, logout, and JWT session handling via HTTP-only cookies.
-- **Merchant Profiles & KYC:** Profile creation/updates across business types (`SOLE_TRADER`, `PARTNERSHIP`, `LIMITED_COMPANY`, `NGO`), document upload flow via signed Cloudflare R2 URLs, and status lifecycle (`INCOMPLETE`, `SUBMITTED`, `IN_REVIEW`, `APPROVED`, `REJECTED`).
+- **Separated Auth Features:** Merchant and admin authentication are grouped under `src/auth/merchant-auth/` and `src/auth/admin-auth/`; their API routes remain `/v1/auth/*` and `/v1/admin-auth/*`.
+- **Merchant Profiles & KYC:** Profile creation/updates across business types (`INDIVIDUAL`, `SOLE_TRADER`, `PARTNERSHIP`, `LIMITED_COMPANY`, `NGO`), document upload via signed S3-compatible URLs (MinIO locally; Cloudflare R2 in production), and status lifecycle (`PENDING_SUBMISSION`, `SUBMITTED`, `UNDER_REVIEW`, `APPROVED`, `REJECTED`, `SUSPENDED`).
 - **Admin Review:** Admin authentication, paginated merchant applications listing, review assignment, and approve/reject workflows with audit history.
 - **Transactions & Hosted Checkout:** Cryptographically encrypted checkout tokens, idempotent transaction creation, hosted checkout session validation, and payment initiation.
-- **Provider Orchestration:** Provider registry with an active simulator/test adapter, signed provider webhook callback handling with HMAC verification, and idempotency guards against stale/duplicate events.
+- **Provider Orchestration:** A shared adapter contract and registry with a test adapter and a NOWPayments crypto adapter. Signed callback/IPN handling includes signature checks, guarded lifecycle transitions, and duplicate-event protection.
+- **NOWPayments + FX:** Crypto payment instructions are created from an MWK transaction using a configured FX quote; IPN success posts through the ledger. This is implemented and tested locally, but has not been validated against a live NOWPayments sandbox or production endpoint.
 - **Persistence:** Relational modeling for merchants, payment lifecycle, versioned fee policies, and immutable double-entry payment postings via Prisma 7 & PostgreSQL.
+- **Settlement Reconciliation:** Provider-neutral normalized provider and bank statement imports, payment matching, allocation, and approval/posting workflow. Provider- and bank-specific parsers remain integration points until real sanitized reports and documentation are available.
 
 ### Roadmap / Not Yet Implemented
-- Live telecom & bank provider adapters (Airtel Money OpenAPI, TNM Mpamba, National Bank, Standard Bank).
-- Provider settlement, withdrawals, refunds, and merchant balance APIs.
+- Live Airtel Money, TNM Mpamba, and bank adapters/parsers. Do not infer their report formats or reference conventions without provider/bank documentation and sanitized samples.
+- Merchant fund release, withdrawals, refunds, reversals, available-balance operations, and public merchant balance APIs.
+- Live NOWPayments sandbox/production verification and operational confirmation of public IPN reachability and FX source freshness.
 
 ### V1 Ledger Foundation
 Successful signed callbacks post balanced entries synchronously in the same PostgreSQL transaction as payment and attempt state changes. Payment creation stores an immutable fee snapshot using the active merchant override or platform default; the migration seeds a ZERO/MWK platform policy. Provider-clearing accounts represent receivables, not settled cash. Legacy `MerchantLedger` balances are reported for reconciliation only and are never converted into opening balances.
@@ -41,6 +45,12 @@ npm run ledger:backfill
 npm run ledger:backfill -- --apply
 ```
 
+Provider-neutral settlement reconciliation and controlled posting are implemented separately from payment capture. Provider/bank-specific statement parsers, merchant fund release, withdrawals, refunds, available-balance operations, and public ledger APIs are not implemented.
+
+The NOWPayments adapter is registered alongside the test adapter. It accepts a crypto `payCurrency` at checkout, converts the merchant transaction's MWK amount into the configured price currency, creates a provider payment, stores the returned address/amount and FX snapshot, and returns payment instructions. The public IPN route is `/v1/provider-callbacks/nowpayments`; callbacks require a valid `x-nowpayments-sig` signature. Stale in-flight payments are also reconciled by polling NOWPayments while the API key is configured. A `finished` result transitions payment state and posts the crypto ledger capture atomically. `NOWPAYMENTS_FEE_BPS` defaults to 0 until a crypto fee rate is approved. Partial payments enter pending reconciliation. A refund IPN received after success is retained for manual handling; it does not change the successful state or automatically reverse the ledger.
+
+The FX provider polls `open.er-api.com` by default every 15 seconds and caches rates in process memory. The upstream publishes rates daily, so the 300-second default age check measures when this process fetched the quote, not the upstream publication age. It does **not** prove that the underlying rate is current; treat this as a readiness limitation.
+
 ---
 
 ## Architecture & Modules
@@ -53,36 +63,54 @@ Clients (Frontend / Merchant API)
   ▼
 Solaris API (/v1)
   │
-  ├── auth/                 # Merchant registration, OTP, 2FA login, JWT cookies
+  ├── auth/
+  │   ├── merchant-auth/    # Merchant registration, OTP, 2FA login, JWT cookies
+  │   └── admin-auth/       # Admin login, roles, and admin JWT
   ├── merchants/            # Business profile management & KYC document handling
-  ├── admin-auth/           # Internal admin login, logout, & cookie management
   ├── admin/                # Merchant application review and approvals
   ├── transactions/         # Payment transactions & hosted checkout flow
-  ├── payment-providers/    # Provider registry & test simulator adapter
+  ├── payment-providers/    # Provider registry, test and NOWPayments adapters
+  ├── fx/                   # MWK conversion-rate provider used for crypto quotes
+  ├── config/               # Namespaced FX and NOWPayments configuration
   ├── provider-callbacks/   # Signed webhook callback verification
+  ├── settlements/          # Provider-neutral reconciliation and posting workflow
   ├── ledger/               # Fee snapshots and immutable double-entry posting
-  ├── storage/              # Cloudflare R2 pre-signed upload URLs
+  ├── storage/              # S3-compatible pre-signed upload URLs
   ├── email/                # Nodemailer SMTP email delivery service
   ├── arcjet/               # Rate limiting, bot protection, & attack shielding
   └── database/             # Prisma client service & DB connection lifecycle
   │
   ▼
-PostgreSQL 15+ (Prisma 7)  +  Redis 6 (Cache & Session Revocation)
+PostgreSQL 15+ (Prisma 7)  +  optional Redis Compose service (not currently used by backend modules)
 ```
+
+Authentication source layout:
+
+```text
+src/auth/
+  merchant-auth/            # Merchant module, DTOs, current-user decorator
+    jwt/                    # Merchant JWT strategy and guard
+  admin-auth/               # Admin module, DTOs, and role authorization
+    jwt/                    # Admin JWT strategy and guard
+```
+
+The feature modules are registered independently; moving them under `auth/` does not change their public route prefixes.
 
 ### Module Responsibilities
 
 | Module | Primary Responsibility |
 |---|---|
-| `auth` | Merchant registration, OTP issuance & validation, password hashing, JWT issue/revocation. |
+| `auth/merchant-auth` | Merchant registration, OTP issuance & validation, password hashing, JWT issue/revocation. |
+| `auth/admin-auth` | Admin credential verification, role authorization, auth cookies, and JWT validation. |
 | `merchants` | Business entity validation, KYC document requirements per business type, submission rules. |
-| `admin-auth` | Admin credential verification, role assignment (`SUPER_ADMIN`, `COMPLIANCE`, `SUPPORT`), auth cookies. |
 | `admin` | Application queueing, starting reviews, approving profiles, rejecting profiles with audit logs. |
 | `transactions` | Idempotent transaction generation, checkout session initialization, customer payment initiation. |
-| `payment-providers` | Provider adapter abstraction, payload transformation, dispatching calls to provider gateway. |
+| `payment-providers` | Provider adapter abstraction and registry; includes test and NOWPayments integrations. |
+| `fx` / `config` | In-process MWK FX quotes and namespaced adapter configuration. |
 | `provider-callbacks` | Cryptographic signature verification, idempotent payment success/failure state transitions. |
 | `ledger` | Versioned fee snapshots, double-entry payment posting, and historical backfill primitives. |
-| `storage` | Cloudflare R2 S3-compatible client, generating pre-signed PUT URLs for KYC uploads. |
+| `settlements` | Normalized provider/bank imports, matching, allocations, approvals, and posting; provider-specific parsers are not included. |
+| `storage` | S3-compatible client, generating pre-signed PUT URLs for KYC uploads (MinIO locally; Cloudflare R2 in production). |
 | `email` | Transactional email delivery (registration OTP, login verification codes). |
 | `arcjet` | Security middleware guarding against brute force attacks and malicious clients. |
 | `database` | PostgreSQL connection pooling, Prisma client management, and health check integration. |
@@ -96,9 +124,9 @@ PostgreSQL 15+ (Prisma 7)  +  Redis 6 (Cache & Session Revocation)
 - **Framework:** NestJS 12
 - **ORM:** Prisma 7
 - **Database:** PostgreSQL
-- **Cache:** Redis 6
+- **Infrastructure:** Redis is included in Docker Compose but has no current application integration.
 - **Security:** Arcjet, bcrypt, crypto HMAC
-- **File Storage:** Cloudflare R2 (AWS S3 SDK)
+- **File Storage:** S3-compatible storage through AWS S3 SDK (MinIO locally; Cloudflare R2 in production)
 - **Testing:** Vitest 4, Supertest
 
 ---
@@ -108,7 +136,7 @@ PostgreSQL 15+ (Prisma 7)  +  Redis 6 (Cache & Session Revocation)
 ### 1. Prerequisites
 - Node.js 24+ and npm
 - PostgreSQL running locally or in Docker
-- Redis running locally or in Docker
+- MinIO (or another configured S3-compatible service) when using the example local storage settings
 
 ### 2. Environment Configuration
 From the `backend/` directory, copy the environment file:
@@ -122,6 +150,8 @@ Review and configure your `backend/.env` file. Essential configuration includes:
 - `JWT_SECRET` & `OTP_SECRET`: Secure random hex strings.
 - `CHECKOUT_TOKEN_ENCRYPTION_KEY`: 32-byte Base64-encoded AES key.
 - `SIGNING_SECRET`: Secret used for HMAC webhook verification.
+
+For NOWPayments, configure `NOWPAYMENTS_API_KEY`, `NOWPAYMENTS_IPN_SECRET`, `NOWPAYMENTS_BASE_URL`, and `PUBLIC_API_BASE_URL`. The public API URL must use reachable HTTPS for sandbox IPNs as well as production. `NOWPAYMENTS_FEE_BPS` sets the approved crypto fee (basis points; defaults to `0`), and `NOWPAYMENTS_PRICE_CURRENCY` defaults to `usd`. `NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS` defaults to `300`; `FX_RATE_API_BASE_URL` defaults to `https://open.er-api.com/v6/latest`; and `FX_RATE_POLL_INTERVAL_MS` defaults to `15000`. Because the upstream feed republishes daily, local fetch age is not proof of underlying rate freshness. Never commit actual credentials.
 
 ### 3. Install Dependencies & Migrate Database
 ```bash
@@ -142,6 +172,8 @@ If using Docker for Redis:
 ```bash
 docker compose up -d redis
 ```
+
+The Compose file starts Redis for its container dependency, but the backend currently has no Redis integration. It does not start PostgreSQL, MinIO, or an SMTP capture service; start those separately or update `.env` to use reachable services.
 
 ### 6. Run the Application
 ```bash
@@ -174,6 +206,7 @@ All routes are versioned under `/v1`.
 | `POST` | `/v1/auth/verify-login` | Public | Validate 2FA OTP and issue HTTP-only `access_token` cookie. |
 | `GET` | `/v1/auth/me` | Cookie | Retrieve current authenticated merchant profile. |
 | `POST` | `/v1/auth/logout` | Cookie | Invalidate JWT, add token to revocation table, and clear cookie. |
+| `DELETE` | `/v1/auth/account` | Cookie | Soft-delete the authenticated merchant account. |
 
 ### Merchant Profile & KYC (`/v1/merchants`)
 | Method | Endpoint | Auth | Description |
@@ -181,7 +214,7 @@ All routes are versioned under `/v1`.
 | `GET` | `/v1/merchants/profile` | Cookie | Get current merchant profile and onboarding status. |
 | `PATCH` | `/v1/merchants/profile` | Cookie | Update editable profile fields. |
 | `POST` | `/v1/merchants/profile/submit` | Cookie | Submit profile and uploaded KYC documents for review. |
-| `POST` | `/v1/merchants/documents/upload-url` | Cookie | Request pre-signed Cloudflare R2 upload URL for a KYC document. |
+| `POST` | `/v1/merchants/documents/upload-url` | Cookie | Request a pre-signed object-storage upload URL for a KYC document. |
 | `POST` | `/v1/merchants/documents/:uploadId/complete` | Cookie | Confirm file upload completion and attach to profile. |
 | `GET` | `/v1/merchants/documents` | Cookie | List all uploaded KYC documents and their statuses. |
 
@@ -193,7 +226,7 @@ All routes are versioned under `/v1`.
 | `GET` | `/v1/admin-auth/me` | Cookie | Return current admin identity and role. |
 | `GET` | `/v1/admin/merchant-applications` | Admin | List paginated merchant applications with filters. |
 | `GET` | `/v1/admin/merchant-applications/:profileId` | Admin | Detailed view of a merchant profile and documents. |
-| `POST` | `/v1/admin/merchant-applications/:profileId/start-review` | Admin | Lock application into `IN_REVIEW` status. |
+| `POST` | `/v1/admin/merchant-applications/:profileId/start-review` | Admin | Move application into `UNDER_REVIEW` status. |
 | `POST` | `/v1/admin/merchant-applications/:profileId/approve` | Admin | Approve merchant application. |
 | `POST` | `/v1/admin/merchant-applications/:profileId/reject` | Admin | Reject merchant application with mandatory reason. |
 
@@ -205,6 +238,24 @@ All routes are versioned under `/v1`.
 | `GET` | `/v1/checkout/:token` | Public | Validate and retrieve hosted checkout session details. |
 | `POST` | `/v1/checkout/:token/pay` | Public | Initiate payment through selected provider. |
 | `POST` | `/v1/provider-callbacks` | Signed | Webhook endpoint receiving signed provider callbacks. |
+
+Crypto checkout calls `POST /v1/checkout/:token/pay` with `{ "provider": "NOWPAYMENTS", "payCurrency": "..." }`; `network` is optional. On successful invoice creation, the response includes `payment_instructions` with the address, amount, currency, network, and optional expiry.
+
+### NOWPayments Webhook
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/v1/provider-callbacks/nowpayments` | NOWPayments IPN signature | Verifies the `x-nowpayments-sig` signature and processes a payment-status notification. |
+
+### Settlement Operations
+
+Settlement operations are under `/v1/admin/settlements`. Importing normalized provider/bank data, reconciliation, and allocations require `OPERATIONS`; approval and posting require `SUPER_ADMIN`. Provider- and bank-specific parsers are intentionally not supplied until their documented formats and sanitized samples are available. These workflows do not release merchant funds.
+
+### Application Diagnostic
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/v1/test` | Public | Returns a basic API-running message; this is not a dependency readiness check. |
 
 ---
 
@@ -222,7 +273,12 @@ npm run test:cov
 
 # End-to-end (E2E) tests
 npm run test:e2e
+
+# PostgreSQL ledger, settlement, and NOWPayments integration tests
+npm run test:ledger:integration
 ```
+
+The integration command requires a dedicated local PostgreSQL test database; do not point it at a development or production database. NOWPayments unit tests mock the external API, so passing tests do not establish live-provider readiness.
 
 ---
 
@@ -242,6 +298,8 @@ npm run format
 
 Detailed technical documents are stored in the `docs/` directory:
 - [Architecture Overview](./docs/architecture/overview.md)
+- [NOWPayments Adapter & FX](./docs/architecture/nowpaymentsAdapter.md)
+- [API Reference](./docs/architecture/apiReference.md)
 - [Auth Contract & Cookies](./docs/architecture/authContract.md)
 - [Database Schema & Migrations](./docs/database/setup.md)
 - [Ledger Module & Cutover Guide](./docs/architecture/ledgerModule.md)

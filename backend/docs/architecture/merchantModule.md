@@ -14,7 +14,7 @@ It allows authenticated merchants to:
 - Submit their application for administrative compliance review.
 - Correct and resubmit an application after rejection.
 
-The module is built with NestJS, Prisma, and PostgreSQL, and integrates with `StorageModule` (Cloudflare R2 via the S3-compatible API). It relies on merchant JWT authentication to identify the caller.
+The module is built with NestJS, Prisma, and PostgreSQL, and integrates with `StorageModule` through the S3-compatible API (MinIO locally; Cloudflare R2 in production). It relies on merchant JWT authentication to identify the caller.
 
 ## 2. Responsibilities
 
@@ -23,7 +23,7 @@ The module is responsible for:
 - Retrieving the authenticated merchant's profile.
 - Updating editable business profile fields.
 - Enforcing profile status restrictions (`PENDING_SUBMISSION` or `REJECTED` for edits and uploads).
-- Generating short-lived (5-minute) pre-signed upload URLs for Cloudflare R2.
+- Generating short-lived (5-minute) pre-signed upload URLs for configured object storage.
 - Verifying uploaded file size (0 < size <= 10 MiB) and MIME type.
 - Inspecting binary magic-byte signatures (PDF, PNG, JPEG) to prevent malicious file uploads.
 - Automatically superseding earlier document versions of the same type while retaining full audit records.
@@ -44,7 +44,7 @@ All endpoints use the `/v1` API prefix and require merchant authentication throu
 | GET | `/v1/merchants/profile` | Retrieve the current merchant's profile and documents |
 | PATCH | `/v1/merchants/profile` | Update editable profile details |
 | POST | `/v1/merchants/profile/submit` | Submit the application for review |
-| POST | `/v1/merchants/documents/upload-url` | Request a pre-signed Cloudflare R2 upload URL |
+| POST | `/v1/merchants/documents/upload-url` | Request a pre-signed object-storage upload URL |
 | POST | `/v1/merchants/documents/:uploadId/complete` | Complete and validate an uploaded KYC document |
 | GET | `/v1/merchants/documents` | List all uploaded documents for the merchant |
 
@@ -229,12 +229,12 @@ The returned `uploadUrl` is a pre-signed S3 `PutObjectCommand` URL valid for **5
 
 **Purpose**
 
-Finalizes the upload process after the client has uploaded the file to Cloudflare R2.
+Finalizes the upload process after the client has uploaded the file to configured object storage.
 
 **Verification logic**
 
 1. Verifies that the upload intent (`uploadId`) exists for the merchant's profile, has not already been completed, and has not expired.
-2. Fetches object metadata from Cloudflare R2 via `HeadObjectCommand`.
+2. Fetches object metadata from object storage via `HeadObjectCommand`.
 3. Validates file size: must be greater than 0 and less than or equal to 10 MiB (10,485,760 bytes).
 4. Validates that the uploaded `ContentType` matches the declared `expectedMimeType`.
 5. Reads the first 16 bytes of the object via range request and verifies the binary magic-byte signature:
@@ -330,7 +330,7 @@ This means a document with status `PENDING` can satisfy the submission-stage che
 
 Superseded documents are excluded from submission validation, consistent with admin approval. They remain in the database for history and do not satisfy required document types.
 
-Document integrity and format authenticity are verified at upload completion by `MerchantDocumentsService` using Cloudflare R2 object metadata and binary magic-number signatures. Direct browser access is prevented; files in storage are identified via private object keys and internal URIs.
+Document integrity and format authenticity are verified at upload completion by `MerchantDocumentsService` using object metadata and binary magic-number signatures. Direct browser access is prevented; files in storage are identified via private object keys and internal URIs.
 
 ## 6. Application Lifecycle
 
@@ -469,11 +469,11 @@ Verify that the request returns HTTP 401 Unauthorized.
 2. Upload plain text or invalid non-PDF binary data to the pre-signed URL.
 3. Call `POST /v1/merchants/documents/{{uploadId}}/complete`.
 4. Verify HTTP 400 Bad Request is returned with `"The file contents do not match the declared format"`.
-5. Verify the corrupted file was purged from Cloudflare R2.
+5. Verify the corrupted file was purged from object storage.
 
 ## 9. Current Scope and Limitations
 
-The module handles profile retrieval, editing, direct-to-cloud KYC document uploads with Cloudflare R2, binary magic-byte validation, document supersession, and application submission. Areas for future extension include:
+The module handles profile retrieval, editing, direct-to-cloud KYC document uploads, binary magic-byte validation, document supersession, and application submission. Areas for future extension include:
 
 - Antivirus/malware scanning pipeline on uploaded blobs.
 - Merchant-facing rejection feedback workflows for specific rejected documents.
@@ -482,4 +482,4 @@ The module handles profile retrieval, editing, direct-to-cloud KYC document uplo
 
 ## 10. Summary
 
-The `merchants` module provides the merchant business-profile and KYC submission workflow for Solaris Malawi. It manages profile updates, direct-to-cloud document uploads via pre-signed Cloudflare R2 URLs, binary signature verification, and transactional submission tracking. Administrator review, approval, and preview access remain separate responsibilities in the `admin` module.
+The `merchants` module provides the merchant business-profile and KYC submission workflow for Solaris Malawi. It manages profile updates, direct-to-cloud document uploads via pre-signed object-storage URLs, binary signature verification, and transactional submission tracking. Administrator review, approval, and preview access remain separate responsibilities in the `admin` module.

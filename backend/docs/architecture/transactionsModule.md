@@ -9,8 +9,9 @@ It covers:
 - merchant-initiated payment transaction creation
 - public hosted checkout sessions
 - provider payment initiation from the checkout page
-- signed provider callback verification
+- signed generic provider callback and NOWPayments IPN verification
 - state transitions for payment attempts and transactions
+- payment capture posting through the ledger
 
 All routes are under the backend URI version prefix `/v1`.
 
@@ -203,8 +204,21 @@ None.
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `provider` | string | Yes | One of `AIRTEL_MONEY`, `TN_MPAMBA`, or `TEST`. |
-| `phoneNumber` | string | Yes | Must be a valid Malawian phone number. |
+| `provider` | string | Yes | Registered choices are `TEST` and `NOWPAYMENTS`. `AIRTEL_MONEY` and `TN_MPAMBA` exist in the enum but have no registered adapters yet. |
+| `phoneNumber` | string | Mobile money / test | Must be a valid Malawian phone number when required by the selected adapter. |
+| `payCurrency` | string | NOWPayments | Required for `NOWPAYMENTS`; provider-supported values must be confirmed against current NOWPayments documentation. |
+| `network` | string | No | Optional crypto network hint. |
+
+For NOWPayments, omit `phoneNumber` and send `payCurrency`, for example:
+
+```json
+{
+  "provider": "NOWPAYMENTS",
+  "payCurrency": "usdttrc20"
+}
+```
+
+An accepted crypto initiation returns `payment_instructions` with the payment address, amount, currency, network, and expiry. `PROCESSING` means the provider invoice/payment flow is active, not that funds are received. The actual result arrives through `POST /v1/provider-callbacks/nowpayments`.
 
 **Success response — `200 OK`**
 
@@ -352,10 +366,13 @@ Provider attempts also track their own granular state:
 
 ## 8. Production caveats
 
-This implementation is intentionally a backend payment workflow, not a complete production settlement stack. The current live provider adapter is a local/test implementation. Production deployments should:
+This implementation is a backend payment workflow, not a complete production payment and settlement stack. `TEST` is the test adapter; `NOWPAYMENTS` is an implemented crypto adapter, but has not been validated against a live sandbox or production endpoint. Production deployments should:
 
 - configure `CHECKOUT_BASE_URL` as a valid HTTPS base URL
 - set a strong `SIGNING_SECRET` for provider callbacks
 - disable the `TEST` provider in production
-- add real provider adapters for Airtel Money and TNM Mpamba as needed
-- implement provider settlement and payment reconciliation workflows before treating pending ledger amounts as settled or withdrawable
+- validate NOWPayments against a live sandbox and confirm public IPN reachability and FX publication freshness
+- add provider-specific Airtel Money and TNM Mpamba adapters and documented bank/provider parsers as requirements and sanitized specifications become available
+- do not treat provider-clearing balances as settled cash or withdrawable merchant funds; settlement posting does not implement merchant fund release
+
+See [nowpaymentsAdapter.md](./nowpaymentsAdapter.md) for NOWPayments configuration, IPN status handling, and remaining readiness gaps. See the [ledger guide](./ledgerModule.md) for the implemented normalized settlement workflow.

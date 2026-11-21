@@ -31,7 +31,8 @@ describe('NowPaymentsApiClient', () => {
       payCurrency: 'btc',
       orderId: 'attempt-1',
       orderDescription: 'Solaris payment',
-      ipnCallbackUrl: 'https://api.solaris.example/v1/webhooks/nowpayments',
+      ipnCallbackUrl:
+        'https://api.solaris.example/v1/provider-callbacks/nowpayments',
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -49,7 +50,7 @@ describe('NowPaymentsApiClient', () => {
           order_id: 'attempt-1',
           order_description: 'Solaris payment',
           ipn_callback_url:
-            'https://api.solaris.example/v1/webhooks/nowpayments',
+            'https://api.solaris.example/v1/provider-callbacks/nowpayments',
         }),
       }),
     );

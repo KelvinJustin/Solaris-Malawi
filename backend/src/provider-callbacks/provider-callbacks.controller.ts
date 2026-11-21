@@ -7,6 +7,7 @@ import {
     HttpStatus,
     Post,
     Req,
+    UnauthorizedException,
 } from '@nestjs/common';
 
 import type { RawBodyRequest } from '@nestjs/common';
@@ -14,6 +15,9 @@ import type { Request } from 'express';
 
 import { ProviderCallbackDto } from './dto/provider-callback.dto.js';
 import { ProviderCallbacksService } from './provider-callbacks.service.js';
+
+import { isNowPaymentsIpnPayload } from '../payment-providers/adapters/nowpayments/nowpayments-webhook-payload.guard.js';
+import { verifyNowPaymentsIpnSignature } from '../payment-providers/adapters/nowpayments/nowpayments-ipn.util.js';
 
 @Controller('provider-callbacks')
 export class ProviderCallbacksController {
@@ -28,7 +32,6 @@ export class ProviderCallbacksController {
      * validated against the exact bytes sent by the provider, not the parsed JSON
      * object created by NestJS after deserialization.
      */
-
     @Post()
     @HttpCode(HttpStatus.OK)
     async handleCallback(
@@ -48,5 +51,27 @@ export class ProviderCallbacksController {
             timestamp,
             signature,
         });
+    }
+
+    /**
+     * Authenticates NOWPayments using its sorted-key JSON IPN signature.
+     */
+    @Post('nowpayments')
+    @HttpCode(HttpStatus.OK)
+    async handleNowPaymentsCallback(
+        @Body() body: unknown,
+        @Headers('x-nowpayments-sig') signature: string | undefined,
+    ) {
+        const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
+
+        if (!ipnSecret || !verifyNowPaymentsIpnSignature(body, signature, ipnSecret)) {
+            throw new UnauthorizedException('Invalid or missing callback signature');
+        }
+
+        if (!isNowPaymentsIpnPayload(body)) {
+            throw new BadRequestException('Unrecognized NOWPayments callback payload');
+        }
+
+        return this.providerCallbacksService.handleNowPaymentsCallback(body);
     }
 }
