@@ -43,11 +43,17 @@ export class NowPaymentsReconciliationService
     }
 
     void this.reconcilePendingPayments().catch((error: unknown) => {
-      this.logger.error('NOWPayments reconciliation run failed.', error);
+      this.logger.error(
+        `NOWPayments reconciliation run failed: ${this.describeError(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
     });
     this.intervalHandle = setInterval(() => {
       void this.reconcilePendingPayments().catch((error: unknown) => {
-        this.logger.error('NOWPayments reconciliation run failed.', error);
+        this.logger.error(
+          `NOWPayments reconciliation run failed: ${this.describeError(error)}`,
+          error instanceof Error ? error.stack : undefined,
+        );
       });
     }, RECONCILIATION_INTERVAL_MS);
     this.intervalHandle.unref?.();
@@ -121,7 +127,7 @@ export class NowPaymentsReconciliationService
           );
         } catch (error) {
           this.logger.error(
-            `Could not reconcile NOWPayments payment ${candidate.nowpaymentsPaymentId}.`,
+            `Could not reconcile NOWPayments payment ${candidate.nowpaymentsPaymentId}: ${this.describeError(error)}`,
             error,
           );
         } finally {
@@ -132,7 +138,7 @@ export class NowPaymentsReconciliationService
             });
           } catch (error) {
             this.logger.error(
-              `Could not update reconciliation time for NOWPayments payment ${candidate.nowpaymentsPaymentId}.`,
+              `Could not update reconciliation time for NOWPayments payment ${candidate.nowpaymentsPaymentId}: ${this.describeError(error)}`,
               error,
             );
           }
@@ -141,5 +147,12 @@ export class NowPaymentsReconciliationService
     } finally {
       this.isRunning = false;
     }
+  }
+
+  private describeError(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return typeof error === 'string' ? error : 'Unknown error';
   }
 }

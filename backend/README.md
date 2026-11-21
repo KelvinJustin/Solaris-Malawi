@@ -184,7 +184,7 @@ npm run start:dev
 npm run build
 npm run start:prod
 ```
-The API will be available at `http://localhost:3000` with all routes prefixed with `/v1`.
+`npm start` and `npm run start:prod` apply pending Prisma migrations before starting the API. They require `DATABASE_URL` to point to the intended database. The API will be available at `http://localhost:3000` with all routes prefixed with `/v1`. `npm run start:dev` does not apply migrations; apply them manually before using development mode.
 
 ### Logging
 
