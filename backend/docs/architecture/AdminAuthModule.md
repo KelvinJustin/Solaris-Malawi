@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The `admin-auth` module handles administrator authentication and session management for Solaris Malawi.
+The `admin-auth` module at `src/auth/admin-auth/` handles administrator authentication and session management for Solaris Malawi. Its JWT implementation is organized under `src/auth/admin-auth/jwt/`; merchant auth remains separate at `src/auth/merchant-auth/`.
 
 It provides three endpoints:
 

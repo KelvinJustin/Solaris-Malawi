@@ -4,15 +4,15 @@
 
 The Storage and Document Upload architecture provides secure, direct-to-cloud object storage for Know Your Customer (KYC) identity and business verification documents in Solaris Malawi.
 
-It integrates **Cloudflare R2** (via the AWS S3-compatible API) with NestJS and Prisma/PostgreSQL to handle document uploads, binary content verification, audit tracking, and administrative inspection.
+It uses the AWS S3-compatible API with NestJS and Prisma/PostgreSQL to handle document uploads, binary content verification, audit tracking, and administrative inspection. Local development uses MinIO; production uses Cloudflare R2 when `R2_ENDPOINT` is unset.
 
 ### Key Objectives
 
-- **Direct-to-Cloud Uploads:** File binaries are uploaded directly from the merchant's browser or mobile client to Cloudflare R2 using short-lived pre-signed `PUT` URLs. This prevents large file streams from consuming Solaris API server memory, CPU, and bandwidth.
+- **Direct-to-Cloud Uploads:** File binaries are uploaded directly from the merchant's browser or mobile client to configured object storage using short-lived pre-signed `PUT` URLs. This prevents large file streams from consuming Solaris API server memory, CPU, and bandwidth.
 - **Strict Verification & Zero Trust:** Uploaded objects are never trusted based on client claims alone. When an upload is finalized, the server inspects object headers and reads binary magic-byte signatures directly from storage before registering the document.
-- **Compromise Remediation:** If an uploaded file fails size, MIME type, or binary signature checks, it is immediately deleted from R2 and rejected.
+- **Compromise Remediation:** If an uploaded file fails size, MIME type, or binary signature checks, it is immediately deleted from object storage and rejected.
 - **Auditability & Supersession:** When a merchant replaces an existing document type (e.g., uploading an updated Tax Certificate), previous versions are not overwritten; they are atomically marked as superseded (`supersededAt`, `supersededByDocumentId`) to preserve a strict compliance audit trail.
-- **Zero Public Access:** The R2 bucket is strictly private. Object keys are stored internally (`r2://...`), and files can only be accessed via time-limited pre-signed URLs (300-second TTL) requested by authorized compliance administrators.
+- **Zero Public Access:** The storage bucket is strictly private. Object keys are stored internally (`r2://...`), and files can only be accessed via time-limited pre-signed URLs (300-second TTL) requested by authorized compliance administrators.
 
 ### Main Files & Services
 
@@ -33,7 +33,7 @@ It integrates **Cloudflare R2** (via the AWS S3-compatible API) with NestJS and 
 The direct-to-cloud upload workflow follows a 4-phase sequence:
 
 ```text
-Merchant Client                  Solaris API                     Cloudflare R2            PostgreSQL
+Merchant Client                  Solaris API                  S3-compatible Storage      PostgreSQL
       │                               │                                │                      │
       │ 1. POST /documents/upload-url │                                │                      │
       │──────────────────────────────>│                                │                      │
@@ -74,21 +74,11 @@ Merchant Client                  Solaris API                     Cloudflare R2  
 
 ## 3. Storage Service Implementation (`R2StorageService`)
 
-`R2StorageService` encapsulates all interactions with Cloudflare R2 using the AWS SDK v3 S3 client.
+`R2StorageService` encapsulates all interactions with configured object storage using the AWS SDK v3 S3 client.
 
 ### Client Configuration
 
-```typescript
-this.client = new S3Client({
-  region: 'auto',
-  endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-  forcePathStyle: true,
-  credentials: {
-    accessKeyId: config.getOrThrow<string>('R2_ACCESS_KEY_ID'),
-    secretAccessKey: config.getOrThrow<string>('R2_SECRET_ACCESS_KEY'),
-  },
-});
-```
+When `R2_ENDPOINT` is set, the service uses that endpoint and the configured `R2_REGION` / `R2_FORCE_PATH_STYLE` values (the `.env.example` defaults target local MinIO). Without `R2_ENDPOINT`, it constructs the Cloudflare R2 endpoint from `R2_ACCOUNT_ID`.
 
 ### Methods Reference
 
@@ -138,7 +128,7 @@ File extensions and HTTP `Content-Type` headers can easily be spoofed by malicio
 | `image/jpeg` | `ff d8 ff` | Standard JPEG Start-Of-Image marker |
 
 If `hasValidSignature()` returns `false`:
-1. The uploaded file is immediately deleted from Cloudflare R2 using `r2StorageService.deleteObject(intent.objectKey)`.
+1. The uploaded file is immediately deleted from configured object storage using `r2StorageService.deleteObject(intent.objectKey)`.
 2. A `400 Bad Request` with message `"The file contents do not match the declared format"` is thrown.
 3. No `MerchantDocument` database record is created.
 
@@ -155,7 +145,7 @@ When a merchant uploads a new document of a type they previously provided:
 2. Within the same atomic Prisma transaction (`$transaction`), all earlier documents for that profile and document type where `supersededAt` is null are updated:
    - `supersededAt = new Date()`
    - `supersededByDocumentId = newDocument.id`
-3. The previous file remains in Cloudflare R2 and PostgreSQL for historical and regulatory audit purposes.
+3. The previous file remains in object storage and PostgreSQL for historical and regulatory audit purposes.
 4. When listing documents (`GET /v1/merchants/documents`), the API dynamically exposes:
    ```json
    "isCurrent": true // false if supersededAt is set
@@ -251,7 +241,17 @@ model MerchantDocument {
 Add the following environment variables to `.env` (refer to `.env.example`):
 
 ```env
-# Cloudflare R2 Storage Configuration
+# Local MinIO (from .env.example)
+R2_ENDPOINT=http://localhost:9000
+R2_REGION=us-east-1
+R2_FORCE_PATH_STYLE=true
+R2_ACCOUNT_ID=local-minio
+R2_ACCESS_KEY_ID=YOUR_S3_ACCESS_KEY
+R2_SECRET_ACCESS_KEY=YOUR_S3_SECRET_KEY
+R2_BUCKET_NAME=solaris-kyc-documents
+
+# For Cloudflare R2, unset R2_ENDPOINT, R2_REGION, and R2_FORCE_PATH_STYLE,
+# then set the real Cloudflare account ID and credentials.
 R2_ACCOUNT_ID="your-cloudflare-account-id"
 R2_ACCESS_KEY_ID="your-r2-access-key"
 R2_SECRET_ACCESS_KEY="your-r2-secret-key"
@@ -275,7 +275,7 @@ R2_BUCKET_NAME="solaris-kyc-documents"
   ```
 - **Expected Response:** `201 Created` with `uploadId`, `uploadUrl`, and `expiresAt`.
 
-### 2. Upload File Directly to Cloudflare R2
+### 2. Upload File Directly to Configured Object Storage
 - **Method:** `PUT`
 - **URL:** `{{uploadUrl}}` (obtained from Step 1)
 - **Headers:** `Content-Type: application/pdf`

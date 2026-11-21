@@ -9,6 +9,7 @@ RUN npm ci --no-audit --no-fund
 
 COPY backend/. ./
 RUN npx prisma generate --config prisma7.config.ts
+RUN npm run build
 
 EXPOSE 3000
-CMD ["npm", "run", "start:dev"]
+CMD ["npm", "run", "start:prod"]

@@ -9,7 +9,7 @@ export default defineConfig({
     include: [
       'src/ledger/*.postgres-spec.ts',
       'src/settlements/*.postgres-spec.ts',
-      'src/payment-providers/adapters/nowpayments/*.postgres-spec.ts',
+      'src/provider-callbacks/*.postgres-spec.ts',
     ],
     fileParallelism: false,
     testTimeout: 30_000,

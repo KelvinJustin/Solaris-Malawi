@@ -9,8 +9,9 @@ It covers:
 - merchant-initiated payment transaction creation
 - public hosted checkout sessions
 - provider payment initiation from the checkout page
-- signed provider callback verification
+- signed generic provider callback and NOWPayments IPN verification
 - state transitions for payment attempts and transactions
+- payment capture posting through the ledger
 
 All routes are under the backend URI version prefix `/v1`.
 
@@ -26,7 +27,7 @@ The checkout routes in `src/transactions/checkout.controller.ts` are intentional
 
 ### Callback endpoint
 
-`POST /v1/provider-callbacks` accepts unsigned provider callbacks over the public internet, but each request must include a timestamp and HMAC signature that matches the raw request body.
+`POST /v1/provider-callbacks` is public (JWT-free), but each request must include a timestamp and HMAC signature that matches the raw request body. NOWPayments uses its separate signature-verified IPN route described in the integration guide.
 
 ## 3. Merchant transaction creation
 
@@ -49,6 +50,8 @@ Required (`access_token` cookie or equivalent JWT bearer token).
 
 **Request body**
 
+MWK payments use the existing tambala input:
+
 ```json
 {
   "amountTambala": 2500,
@@ -58,11 +61,30 @@ Required (`access_token` cookie or equivalent JWT bearer token).
 }
 ```
 
+Crypto payments use a separate request shape:
+
+```json
+{
+  "paymentType": "CRYPTO",
+  "provider": "NOWPAYMENTS",
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75",
+  "description": "Order INV-2048",
+  "merchantReference": "INV-2048"
+}
+```
+
 **Field rules**
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `amountTambala` | integer | Yes | Must be an integer greater than or equal to 1 and not exceed `2_147_483_647`. |
+| `paymentType` | string | No | `MWK` or `CRYPTO`; omitted defaults to MWK. |
+| `amountTambala` | integer | MWK | Must be an integer greater than or equal to 1 and not exceed `2_147_483_647`. |
+| `provider` | string | Crypto | Must be `NOWPAYMENTS`. |
+| `asset` | string | Crypto | Must be a supported asset/network pair. |
+| `network` | string or null | Crypto | Native assets use `null` or omit this field. |
+| `amount` | decimal string | Crypto | Positive; up to 18 integer and 18 fractional digits. |
 | `customerPhone` | string | No | If provided, must be a valid Malawian phone number. |
 | `description` | string | No | Maximum 255 characters. |
 | `merchantReference` | string | No | Maximum 100 characters. |
@@ -71,7 +93,7 @@ Required (`access_token` cookie or equivalent JWT bearer token).
 
 The merchant's profile must be `APPROVED` before a transaction can be created. If the profile is not approved, the server returns `403 Forbidden`.
 
-**Success response — `200 OK` or `201 Created`**
+**Example success response — `201 Created` (TEST provider)**
 
 ```json
 {
@@ -88,8 +110,10 @@ The merchant's profile must be `APPROVED` before a transaction can be created. I
 
 - `publicReference` is a public, merchant-facing reference and is not the database UUID.
 - `checkout_url` is generated from `CHECKOUT_BASE_URL` and points to the hosted checkout page.
+- Crypto creation returns `paymentType`, `provider`, `asset`, `network`, and normalized decimal-string `amount` instead of `amountTambala`/`currency`.
 - Reusing the same `Idempotency-Key` with identical payload data returns the same checkout result instead of creating a new transaction.
 - Reusing the same `Idempotency-Key` with different payment data results in `409 Conflict`.
+- Crypto requests do not create an MWK fee snapshot. NOWPayments' required USD `price_amount` is a provider-only reference; the exact crypto input is submitted as `pay_amount`.
 
 ### 3.2 Get a merchant transaction
 
@@ -109,26 +133,36 @@ Required.
 
 **Success response — `200 OK`**
 
-The response is the persisted payment transaction record, for example:
+The response is shaped by payment type. An MWK response is:
 
 ```json
 {
-  "id": "d8d390c6-a8d2-4017-8a17-64f8b9f2bbd5",
   "publicReference": "sp_9d1a3f5e4c214d82a8d9f4bdff9e0e6d",
-  "merchantId": "5bde7288-8b19-4db1-a7f7-f8d5a0547949",
   "amountTambala": 2500,
   "currency": "MWK",
   "status": "PROCESSING",
   "provider": "TEST",
-  "providerReference": "provider-ref-123",
-  "customerPhone": "+265991234567",
   "description": "Order #123",
   "merchantReference": "INV-123",
-  "idempotencyKey": "request-123",
-  "failureCode": null,
-  "failureMessage": null,
   "createdAt": "2026-11-07T12:15:00.000Z",
-  "updatedAt": "2026-11-07T12:16:00.000Z",
+  "processedAt": null
+}
+```
+
+For crypto, the financial fields are `paymentType`, `asset`, `network`, and `amount`:
+
+```json
+{
+  "publicReference": "sp_9d1a3f5e4c214d82a8d9f4bdff9e0e6d",
+  "paymentType": "CRYPTO",
+  "provider": "NOWPAYMENTS",
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75",
+  "status": "PROCESSING",
+  "description": "Order INV-2048",
+  "merchantReference": "INV-2048",
+  "createdAt": "2026-11-07T12:15:00.000Z",
   "processedAt": null
 }
 ```
@@ -156,6 +190,24 @@ None.
 | `token` | string | Yes | Public checkout token generated during transaction creation. |
 
 **Success response — `200 OK`**
+
+For a crypto transaction:
+
+```json
+{
+  "reference": "sp_9d1a3f5e4c214d82a8d9f4bdff9e0e6d",
+  "status": "CREATED",
+  "paymentType": "CRYPTO",
+  "provider": "NOWPAYMENTS",
+  "asset": "USDT",
+  "network": "TRC20",
+  "amount": "25.75",
+  "description": "Order INV-2048",
+  "canPay": true
+}
+```
+
+For comparison, MWK checkout continues to return `amountTambala` and `currency`:
 
 ```json
 {
@@ -203,10 +255,21 @@ None.
 
 | Field | Type | Required | Rules |
 |---|---|---|---|
-| `provider` | string | Yes | One of `AIRTEL_MONEY`, `TN_MPAMBA`, or `TEST`. |
-| `phoneNumber` | string | Yes | Must be a valid Malawian phone number. |
+| `provider` | string | Yes | Registered choices are `TEST` and `NOWPAYMENTS`. `AIRTEL_MONEY` and `TN_MPAMBA` exist in the enum but have no registered adapters yet. |
+| `phoneNumber` | string | Mobile money / test | Must be a valid Malawian phone number when required by the selected adapter. |
+| Crypto denomination | — | NOWPayments | Asset, network, and amount are fixed at transaction creation; initiation accepts no replacement values. |
 
-**Success response — `200 OK`**
+For NOWPayments, omit `phoneNumber` and send only:
+
+```json
+{
+  "provider": "NOWPAYMENTS"
+}
+```
+
+An accepted crypto initiation returns `payment_instructions` with the payment address, pay amount, asset, network, and expiry. `PROCESSING` means the provider invoice/payment flow is active, not that funds are received. The actual result arrives through `POST /v1/provider-callbacks/nowpayments`.
+
+**Success response — `201 Created`**
 
 ```json
 {
@@ -221,9 +284,9 @@ None.
 
 | Status | Meaning |
 |---|---|
-| `PROCESSING` | The provider accepted the request and customer completion is pending. |
-| `FAILED` | The provider rejected the request immediately. |
-| `PENDING_RECONCILIATION` | The provider response was uncertain or inconclusive. |
+| `PROCESSING` | The provider accepted the request and customer completion is pending. For NOWPayments, instructions exist but funds are not yet confirmed. |
+| `FAILED` | The provider rejected the request immediately or reported a failed/expired payment. |
+| `PENDING_RECONCILIATION` | NOWPayments initiation was uncertain, the customer partially paid, or a pre-success refund was reported; an operator/reconciliation action is needed. |
 | `CREATED` | The transaction is still waiting to start. |
 
 **Failure cases**
@@ -231,7 +294,7 @@ None.
 - `404 Not Found` for invalid or expired checkout links
 - `409 Conflict` when the checkout link has already been used or the payment can no longer be initiated
 - `400 Bad Request` when a phone number is required or invalid
-- `503` style provider errors depending on the actual adapter implementation
+- For NOWPayments, provider configuration, estimate, or payment-creation failures are returned in the `201 Created` response as `FAILED` or `PENDING_RECONCILIATION`, without `payment_instructions`; these provider outcomes are not HTTP `503` responses.
 
 ## 5. Provider callback API
 
@@ -324,9 +387,11 @@ If the callback is a duplicate of a previously processed final result, the API a
 
 ## 6. Successful callback ledger posting
 
-After a signed callback validates and conditionally transitions a payment and attempt to `SUCCEEDED`, the callback handler invokes `LedgerPostingService` with the same `Prisma.TransactionClient`. Payment status, attempt status, ledger transaction, entries, and balance projections commit or roll back together. Failed or unsupported outcomes do not create successful-payment ledger entries. Duplicate/concurrent callbacks cannot post the payment twice.
+For the generic MWK callback, after the signed callback validates and conditionally transitions a payment and attempt to `SUCCEEDED`, the handler invokes `LedgerPostingService` with the same `Prisma.TransactionClient`. Payment status, attempt status, ledger transaction, entries, and balance projections commit or roll back together. Failed or unsupported outcomes do not create successful-payment ledger entries. Duplicate/concurrent callbacks cannot post the payment twice.
 
 The posting uses the immutable fee snapshot stored when the payment was created. It does not query the current fee policy or recalculate the historical fee. Provider clearing is recorded as a receivable; it does not imply provider cash has settled. No external request, notification, webhook delivery, worker, or outbox is part of this transaction.
+
+NOWPayments IPNs use `POST /v1/provider-callbacks/nowpayments` and a separate `CryptoLedgerPostingService`. A `finished` IPN posts the provider-reported `actually_paid` amount in the original crypto asset/network, applying `NOWPAYMENTS_FEE_BPS`; it is not converted into MWK or posted through the MWK fee snapshot. Payment, crypto detail, and crypto ledger entries are committed atomically. See [NOWPayments Crypto Integration](./nowpaymentsIntegration.md) for the IPN and lifecycle contract.
 
 For the accounts, entry directions, fee configuration, and historical backfill/cutover instructions, see the [ledger module guide](./ledgerModule.md). No ledger posting endpoint is exposed.
 
@@ -340,9 +405,9 @@ The implemented status flow is intentionally conservative.
 | `PROCESSING` | Provider request has been accepted and the customer is completing a payment flow. |
 | `SUCCEEDED` | Provider callback marks the payment as successful. |
 | `FAILED` | Provider callback or rejection result marks the payment as failed. |
-| `PENDING_RECONCILIATION` | Final provider outcome is uncertain and manual reconciliation is needed. |
+| `PENDING_RECONCILIATION` | For NOWPayments, initiation had an ambiguous result, the customer partially paid, or a pre-success refund was reported. It requires reconciliation; a refund IPN after an already-recorded success does not reverse that success automatically. |
 
-Provider attempts also track their own granular state:
+Provider attempts also track their own granular state. For NOWPayments, `UNKNOWN` covers ambiguous initiation and unresolved partial-payment/refund outcomes:
 
 - `STARTED`
 - `PROCESSING`
@@ -352,10 +417,13 @@ Provider attempts also track their own granular state:
 
 ## 8. Production caveats
 
-This implementation is intentionally a backend payment workflow, not a complete production settlement stack. The current live provider adapter is a local/test implementation. Production deployments should:
+This implementation is a backend payment workflow, not a complete production payment and settlement stack. `TEST` is the test adapter; `NOWPAYMENTS` is an implemented crypto adapter, but has not been validated against a live sandbox or production endpoint. Production deployments should:
 
 - configure `CHECKOUT_BASE_URL` as a valid HTTPS base URL
 - set a strong `SIGNING_SECRET` for provider callbacks
 - disable the `TEST` provider in production
-- add real provider adapters for Airtel Money and TNM Mpamba as needed
-- implement provider settlement and payment reconciliation workflows before treating pending ledger amounts as settled or withdrawable
+- validate NOWPayments against a live sandbox and confirm public IPN reachability
+- add provider-specific Airtel Money and TNM Mpamba adapters and documented bank/provider parsers as requirements and sanitized specifications become available
+- do not treat provider-clearing balances as settled cash or withdrawable merchant funds; settlement posting does not implement merchant fund release
+
+See [nowpaymentsIntegration.md](./nowpaymentsIntegration.md) for the NOWPayments request/response contract and configuration. See the [ledger guide](./ledgerModule.md) for the implemented normalized settlement workflow.

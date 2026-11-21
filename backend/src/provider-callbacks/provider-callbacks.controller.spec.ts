@@ -1,7 +1,6 @@
-import {
-  BadRequestException,
-} from '@nestjs/common';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { createHmac } from 'node:crypto';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Test, type TestingModule } from '@nestjs/testing';
 
 import { ProviderCallbacksController } from './provider-callbacks.controller.js';
@@ -12,10 +11,14 @@ describe('ProviderCallbacksController', () => {
 
   const providerCallbacksService = {
     handleCallback: vi.fn(),
+    handleNowPaymentsCallback: vi.fn(),
   };
+
+  const previousIpnSecret = process.env.NOWPAYMENTS_IPN_SECRET;
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    process.env.NOWPAYMENTS_IPN_SECRET = 'test-ipn-secret';
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ProviderCallbacksController],
@@ -27,7 +30,17 @@ describe('ProviderCallbacksController', () => {
       ],
     }).compile();
 
-    controller = module.get<ProviderCallbacksController>(ProviderCallbacksController);
+    controller = module.get<ProviderCallbacksController>(
+      ProviderCallbacksController,
+    );
+  });
+
+  afterEach(() => {
+    if (previousIpnSecret === undefined) {
+      delete process.env.NOWPAYMENTS_IPN_SECRET;
+    } else {
+      process.env.NOWPAYMENTS_IPN_SECRET = previousIpnSecret;
+    }
   });
 
   it('should be defined', () => {
@@ -53,12 +66,7 @@ describe('ProviderCallbacksController', () => {
     providerCallbacksService.handleCallback.mockResolvedValue(result);
 
     await expect(
-      controller.handleCallback(
-        body,
-        request,
-        '1736182800123',
-        'aabbccddeeff',
-      ),
+      controller.handleCallback(body, request, '1736182800123', 'aabbccddeeff'),
     ).resolves.toEqual(result);
 
     expect(providerCallbacksService.handleCallback).toHaveBeenCalledWith({
@@ -83,9 +91,57 @@ describe('ProviderCallbacksController', () => {
     } as any;
 
     await expect(
-      controller.handleCallback(body, {} as any, '1736182800123', 'aabbccddeeff'),
+      controller.handleCallback(
+        body,
+        {} as any,
+        '1736182800123',
+        'aabbccddeeff',
+      ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(providerCallbacksService.handleCallback).not.toHaveBeenCalled();
+  });
+
+  it('verifies NOWPayments IPNs and forwards the validated payload', async () => {
+    const body = {
+      actually_paid: 0.00012,
+      payment_id: 'np-payment-1',
+      payment_status: 'finished',
+    };
+    const signature = createHmac('sha512', 'test-ipn-secret')
+      .update(JSON.stringify(body))
+      .digest('hex');
+    const result = { received: true, duplicate: false };
+    providerCallbacksService.handleNowPaymentsCallback.mockResolvedValue(
+      result,
+    );
+
+    const request = { rawBody: Buffer.from(JSON.stringify(body)) } as any;
+    await expect(
+      controller.handleNowPaymentsCallback(body, request, signature),
+    ).resolves.toEqual(result);
+    expect(
+      providerCallbacksService.handleNowPaymentsCallback,
+    ).toHaveBeenCalledWith({
+      ...body,
+      actually_paid: '0.00012',
+    });
+  });
+
+  it('rejects a NOWPayments IPN with an invalid signature', async () => {
+    await expect(
+      controller.handleNowPaymentsCallback(
+        { payment_id: 'np-payment-1', payment_status: 'finished' },
+        {
+          rawBody: Buffer.from(
+            '{"payment_id":"np-payment-1","payment_status":"finished"}',
+          ),
+        } as any,
+        'invalid',
+      ),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(
+      providerCallbacksService.handleNowPaymentsCallback,
+    ).not.toHaveBeenCalled();
   });
 });

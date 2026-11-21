@@ -1,24 +1,31 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ConfigService } from '@nestjs/config';
 import {
-  FeeType,
   LedgerAccountStatus,
+  LedgerAccountType,
   LedgerEntryDirection,
+  LedgerNormalBalance,
   LedgerTransactionStatus,
   PaymentAttemptStatus,
   PaymentProvider,
   PaymentStatus,
-} from '../../../generated/prisma/enums.js';
-import { DatabaseService } from '../../../database/database.service.js';
-import { LedgerPostingService } from '../../../ledger/ledger-posting.service.js';
-import { NowPaymentsWebhookService } from './nowpayments-webhook.service.js';
+  PaymentType,
+} from '../generated/prisma/enums.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { DatabaseService } from '../database/database.service.js';
+import { CryptoLedgerPostingService } from '../ledger/crypto-ledger-posting.service.js';
+import { LedgerPostingService } from '../ledger/ledger-posting.service.js';
+import type { NowPaymentsIpnPayload } from '../payment-providers/adapters/nowpayments/nowpayments-webhook-payload.guard.js';
+import { ProviderCallbacksService } from './provider-callbacks.service.js';
 
 describe('NOWPayments PostgreSQL integration', () => {
   let database: DatabaseService;
-  let webhookService: NowPaymentsWebhookService;
+  let callbacks: ProviderCallbacksService;
   let originalDatabaseUrl: string | undefined;
-  let feePolicyId: string;
-  const clearingAccountKey = 'provider-clearing:MWK:NOWPAYMENTS';
+
+  const providerClearingKey =
+    'crypto-provider-clearing:NOWPAYMENTS:BTC:NONE';
 
   beforeAll(async () => {
     const testDatabaseUrl = process.env.LEDGER_TEST_DATABASE_URL;
@@ -39,27 +46,11 @@ describe('NOWPayments PostgreSQL integration', () => {
     database = new DatabaseService();
     await database.$connect();
 
-    const [policy, clearingAccount] = await Promise.all([
-      database.feePolicy.findFirst({
-        where: { merchantId: null, currency: 'MWK', active: true },
-        select: { id: true, type: true },
-      }),
-      database.ledgerAccount.findUnique({
-        where: { key: clearingAccountKey },
-        select: { id: true, status: true },
-      }),
-    ]);
-    if (!policy || policy.type !== FeeType.ZERO) {
-      throw new Error('Active ZERO/MWK platform fee policy is required');
-    }
-    if (!clearingAccount || clearingAccount.status !== LedgerAccountStatus.ACTIVE) {
-      throw new Error('Active NOWPAYMENTS MWK clearing account is required');
-    }
-
-    feePolicyId = policy.id;
-    webhookService = new NowPaymentsWebhookService(
+    callbacks = new ProviderCallbacksService(
       database,
       new LedgerPostingService(),
+      new CryptoLedgerPostingService(),
+      { getOrThrow: () => 250 } as unknown as ConfigService,
     );
   });
 
@@ -69,33 +60,33 @@ describe('NOWPayments PostgreSQL integration', () => {
     else process.env.DATABASE_URL = originalDatabaseUrl;
   });
 
-  it('posts one balanced capture journal for concurrent duplicate finished IPNs', async () => {
+  it('posts one balanced crypto capture for concurrent duplicate finished IPNs', async () => {
     const fixture = await createCryptoPaymentFixture();
-    const payload = {
+    const payload: NowPaymentsIpnPayload = {
       payment_id: fixture.nowPaymentsId,
-      payment_status: 'finished' as const,
-      actually_paid: 0.00012,
+      payment_status: 'finished',
+      actually_paid: '0.00012',
     };
 
-    await Promise.all([
-      webhookService.handleVerifiedCallback(payload),
-      webhookService.handleVerifiedCallback(payload),
+    const results = await Promise.all([
+      callbacks.handleNowPaymentsCallback(payload),
+      callbacks.handleNowPaymentsCallback(payload),
     ]);
 
-    const [payment, attempt, ledgerTransactions, eventCount] = await Promise.all([
+    const [payment, attempt, postings, eventCount] = await Promise.all([
       database.paymentTransaction.findUniqueOrThrow({
         where: { id: fixture.paymentId },
       }),
       database.paymentAttempt.findUniqueOrThrow({
         where: { id: fixture.attemptId },
       }),
-      database.ledgerTransaction.findMany({
+      database.cryptoLedgerTransaction.findMany({
         where: {
-          sourceType: 'PAYMENT',
+          sourceType: 'CRYPTO_PAYMENT',
           sourceId: fixture.paymentId,
           postingPurpose: 'SUCCESS',
         },
-        include: { entries: true },
+        include: { entries: { include: { account: true } } },
       }),
       database.cryptoPaymentIpnEvent.count({
         where: {
@@ -106,51 +97,68 @@ describe('NOWPayments PostgreSQL integration', () => {
       }),
     ]);
 
+    expect(
+      results
+        .map((result) => result.duplicate)
+        .sort((left, right) => Number(left) - Number(right)),
+    ).toEqual([false, true]);
     expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
     expect(attempt.status).toBe(PaymentAttemptStatus.SUCCEEDED);
-    expect(ledgerTransactions).toHaveLength(1);
+    expect(postings).toHaveLength(1);
     expect(eventCount).toBe(2);
-    expect(ledgerTransactions[0].status).toBe(LedgerTransactionStatus.POSTED);
-    expect(ledgerTransactions[0].entries).toHaveLength(2);
-    expect(
-      ledgerTransactions[0].entries.reduce(
-        (total, entry) =>
-          total +
-          (entry.direction === LedgerEntryDirection.DEBIT
-            ? entry.amountTambala
-            : 0n),
-        0n,
-      ),
-    ).toBe(1_000_000n);
-    expect(
-      ledgerTransactions[0].entries.reduce(
-        (total, entry) =>
-          total +
-          (entry.direction === LedgerEntryDirection.CREDIT
-            ? entry.amountTambala
-            : 0n),
-        0n,
-      ),
-    ).toBe(1_000_000n);
+    expect(postings[0].status).toBe(LedgerTransactionStatus.POSTED);
+    expect(postings[0].entries).toHaveLength(3);
+
+    const debitTotal = postings[0].entries
+      .filter((entry) => entry.direction === LedgerEntryDirection.DEBIT)
+      .reduce(
+        (total, entry) => total.add(entry.amount),
+        new Prisma.Decimal(0),
+      );
+    const creditTotal = postings[0].entries
+      .filter((entry) => entry.direction === LedgerEntryDirection.CREDIT)
+      .reduce(
+        (total, entry) => total.add(entry.amount),
+        new Prisma.Decimal(0),
+      );
+    const fee = postings[0].entries.find(
+      (entry) => entry.account.code === 'PLATFORM_CRYPTO_FEE_REVENUE',
+    );
+
+    expect(debitTotal.toString()).toBe('0.00012');
+    expect(creditTotal.toString()).toBe('0.00012');
+    expect(fee?.amount.toString()).toBe('0.000003');
   });
 
-  it('rolls back payment and attempt transitions if ledger posting fails', async () => {
+  it('rolls back payment and attempt updates when the crypto ledger account is frozen', async () => {
     const fixture = await createCryptoPaymentFixture();
-    await database.ledgerAccount.update({
-      where: { key: clearingAccountKey },
-      data: { status: LedgerAccountStatus.FROZEN },
+    const clearingAccount = await database.cryptoLedgerAccount.upsert({
+      where: { key: providerClearingKey },
+      create: {
+        key: providerClearingKey,
+        code: 'PROVIDER_CRYPTO_CLEARING',
+        name: 'NOWPayments BTC clearing',
+        type: LedgerAccountType.ASSET,
+        normalBalance: LedgerNormalBalance.DEBIT,
+        status: LedgerAccountStatus.FROZEN,
+        asset: 'BTC',
+        network: null,
+        provider: PaymentProvider.NOWPAYMENTS,
+      },
+      update: { status: LedgerAccountStatus.FROZEN },
     });
 
     try {
       await expect(
-        webhookService.handleVerifiedCallback({
+        callbacks.handleNowPaymentsCallback({
           payment_id: fixture.nowPaymentsId,
           payment_status: 'finished',
+          actually_paid: '0.00012',
         }),
-      ).rejects.toThrow('Ledger account is not active');
+      ).rejects.toThrow('is not active');
     } finally {
-      await database.ledgerAccount.update({
-        where: { key: clearingAccountKey },
+      await database.cryptoLedgerAccount.update({
+        where: { id: clearingAccount.id },
         data: { status: LedgerAccountStatus.ACTIVE },
       });
     }
@@ -162,9 +170,9 @@ describe('NOWPayments PostgreSQL integration', () => {
       database.paymentAttempt.findUniqueOrThrow({
         where: { id: fixture.attemptId },
       }),
-      database.ledgerTransaction.count({
+      database.cryptoLedgerTransaction.count({
         where: {
-          sourceType: 'PAYMENT',
+          sourceType: 'CRYPTO_PAYMENT',
           sourceId: fixture.paymentId,
           postingPurpose: 'SUCCESS',
         },
@@ -198,19 +206,25 @@ describe('NOWPayments PostgreSQL integration', () => {
       data: {
         publicReference: `crypto-${suffix}`,
         merchantId: merchant.id,
-        amountTambala: 1_000_000,
-        currency: 'MWK',
-        feeTambala: 0n,
-        merchantNetTambala: 1_000_000n,
-        feeType: FeeType.ZERO,
-        feePercentageBps: 0,
-        feeFixedTambala: 0n,
-        feePolicyId,
-        feePolicyVersion: 1,
+        paymentType: PaymentType.CRYPTO,
         status: PaymentStatus.PROCESSING,
         provider: PaymentProvider.NOWPAYMENTS,
         providerReference: `np-${suffix}`,
         idempotencyKey: `crypto-${suffix}`,
+        cryptoDetail: {
+          create: {
+            asset: 'BTC',
+            network: null,
+            requestedAmount: '0.00012',
+            providerCurrency: 'btc',
+            nowpaymentsPaymentId: `np-${suffix}`,
+            payAmount: '0.00012',
+            priceCurrency: 'btc',
+            priceAmount: '0.00012',
+            paymentAddress: `wallet-${suffix}`,
+            lastReportedStatus: 'waiting',
+          },
+        },
       },
     });
     const attempt = await database.paymentAttempt.create({
@@ -222,19 +236,9 @@ describe('NOWPayments PostgreSQL integration', () => {
         providerReference: `np-${suffix}`,
       },
     });
-    await database.cryptoPaymentDetail.create({
-      data: {
-        attemptId: attempt.id,
-        nowpaymentsPaymentId: `np-${suffix}`,
-        payCurrency: 'btc',
-        payAmount: '0.00012',
-        priceCurrency: 'usd',
-        priceAmount: '7.00',
-        fxRateMwkToPriceCurrency: '0.0007',
-        fxRateCapturedAt: new Date(),
-        paymentAddress: `wallet-${suffix}`,
-        lastReportedStatus: 'waiting',
-      },
+    await database.cryptoPaymentDetail.update({
+      where: { transactionId: payment.id },
+      data: { attemptId: attempt.id },
     });
 
     return {

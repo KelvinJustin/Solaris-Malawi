@@ -1,5 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ConfigService } from '@nestjs/config';
 import {
   FeeType,
   LedgerAccountStatus,
@@ -8,10 +9,12 @@ import {
   PaymentAttemptStatus,
   PaymentProvider,
   PaymentStatus,
+  PaymentType,
 } from '../generated/prisma/enums.js';
 import { DatabaseService } from '../database/database.service.js';
 import { createFeePolicyVersion } from './fee-policy-management.js';
 import { FeePolicyService } from './fee-policy.service.js';
+import { CryptoLedgerPostingService } from './crypto-ledger-posting.service.js';
 import { LedgerPostingService } from './ledger-posting.service.js';
 import { ProviderCallbackStatus } from '../provider-callbacks/dto/provider-callback.dto.js';
 import { ProviderCallbacksService } from '../provider-callbacks/provider-callbacks.service.js';
@@ -90,6 +93,8 @@ describe('payment capture PostgreSQL integration', () => {
     callbacks = new ProviderCallbacksService(
       database,
       new LedgerPostingService(),
+      new CryptoLedgerPostingService(),
+      new ConfigService({ NOWPAYMENTS_FEE_BPS: 0 }),
     );
   });
 
@@ -414,9 +419,14 @@ describe('payment capture PostgreSQL integration', () => {
         data: {
           publicReference: `sp_it_${randomUUID().replaceAll('-', '')}`,
           merchantId: merchant.id,
-          amountTambala: paymentAmountTambala,
-          currency: 'MWK',
-          ...fee,
+          paymentType: PaymentType.MWK,
+          status: PaymentStatus.PROCESSING,
+          mwkDetail: {
+            create: {
+              amountTambala: paymentAmountTambala,
+              ...fee,
+            },
+          },
           idempotencyKey: `it_${randomUUID()}`,
         },
       });
@@ -441,15 +451,21 @@ describe('payment capture PostgreSQL integration', () => {
     );
 
     await expect(
-      database.paymentTransaction.update({
-        where: { id: snapshot.paymentId },
+      database.mwkPaymentDetail.update({
+        where: { transactionId: snapshot.paymentId },
         data: { feeTambala: 251n },
+      }),
+    ).rejects.toThrow();
+    await expect(
+      database.mwkPaymentDetail.delete({
+        where: { transactionId: snapshot.paymentId },
       }),
     ).rejects.toThrow();
 
     const [persistedPayment, nextSnapshot] = await Promise.all([
       database.paymentTransaction.findUniqueOrThrow({
         where: { id: snapshot.paymentId },
+        include: { mwkDetail: true },
       }),
       database.$transaction((tx) =>
         new FeePolicyService().snapshotForPayment(tx, {
@@ -459,10 +475,10 @@ describe('payment capture PostgreSQL integration', () => {
         }),
       ),
     ]);
-    expect(persistedPayment.feeTambala).toBe(250n);
-    expect(persistedPayment.merchantNetTambala).toBe(9_750n);
-    expect(persistedPayment.feePolicyId).toBe(firstPolicy.id);
-    expect(persistedPayment.feePolicyVersion).toBe(1);
+    expect(persistedPayment.mwkDetail?.feeTambala).toBe(250n);
+    expect(persistedPayment.mwkDetail?.merchantNetTambala).toBe(9_750n);
+    expect(persistedPayment.mwkDetail?.feePolicyId).toBe(firstPolicy.id);
+    expect(persistedPayment.mwkDetail?.feePolicyVersion).toBe(1);
     expect(nextSnapshot.feeType).toBe(FeeType.FIXED);
     expect(nextSnapshot.feeTambala).toBe(100n);
   });
@@ -508,9 +524,13 @@ describe('payment capture PostgreSQL integration', () => {
       data: {
         publicReference: `sp_it_${randomUUID().replaceAll('-', '')}`,
         merchantId: merchant.id,
-        amountTambala: paymentAmountTambala,
-        currency: 'MWK',
-        ...feeSnapshot,
+        paymentType: PaymentType.MWK,
+        mwkDetail: {
+          create: {
+            amountTambala: paymentAmountTambala,
+            ...feeSnapshot,
+          },
+        },
         idempotencyKey: `it_${randomUUID()}`,
         status: PaymentStatus.PROCESSING,
         provider: PaymentProvider.TEST,

@@ -1,0 +1,20 @@
+info:
+  name: Reconcile Provider Batch
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/admin/settlements/:batchId/reconcile"
+  params:
+    - name: batchId
+      value: "{{batchId}}"
+      type: path
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

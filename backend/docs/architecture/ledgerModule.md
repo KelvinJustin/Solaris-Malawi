@@ -1,22 +1,22 @@
 # Ledger Module and V1 Cutover Guide
 
-This document describes the ledger behavior implemented in Solaris today. It is intentionally limited to successful payment postings and historical payment backfill; it is not a general accounting or settlement API.
+This document describes the ledger behavior implemented in Solaris today: successful payment capture, normalized provider-to-bank settlement posting, and historical payment backfill. It is not a general accounting or merchant balance API.
 
 ## 1. Scope and invariants
 
-The V1 ledger records a provider-confirmed successful payment as a balanced, immutable double-entry transaction. The ledger is the financial record for those postings; `MerchantLedger` remains a legacy table for reconciliation and is not used as the ledger source of truth.
+The MWK ledger records a provider-confirmed successful MWK payment as a balanced, immutable double-entry transaction. Crypto payments use a separate native-asset ledger described in [Crypto payment postings](#10-crypto-payment-postings). The ledgers are financial records for their own denominations; `MerchantLedger` remains a legacy table for reconciliation and is not used as the ledger source of truth.
 
 The implementation enforces these rules:
 
 - Every posted transaction has at least two positive entries.
 - Total debits equal total credits, and every entry uses the transaction currency.
-- Payment amounts are integer tambala (`100 tambala = 1 MWK`). Persisted entry amounts use PostgreSQL `BIGINT` / Prisma `BigInt`, not floating-point arithmetic.
+- MWK payment amounts are integer tambala (`100 tambala = 1 MWK`). Persisted MWK entry amounts use PostgreSQL `BIGINT` / Prisma `BigInt`; crypto entries use exact decimal amounts in the original asset/network.
 - A posted transaction and its entries cannot be changed or deleted. Corrections require a future compensating posting flow; direct edits are not supported.
 - One payment-success posting is permitted per payment, enforced by the unique tuple `sourceType`, `sourceId`, and `postingPurpose`.
 - Projection updates and ledger entries are committed atomically.
 
-The initial supported currency is MWK. Provider-clearing accounts are receivables from payment providers, not evidence that cash has reached a Solaris bank account.
-Merchant pending and merchant available are separate liability concepts; only merchant-pending accounts exist in this payment-capture phase. No available balance is calculated or exposed.
+The MWK ledger handles MWK provider-clearing accounts, which are receivables from payment providers, not evidence that cash has reached a Solaris bank account.
+Merchant pending and merchant available are separate liability concepts; only merchant-pending accounts exist. Settlement posting clears provider receivables against reconciled bank credits but does not release merchant funds to an available balance or expose a merchant balance API.
 
 ## 2. V1 boundaries
 
@@ -24,14 +24,15 @@ Implemented now:
 
 - Successful provider callback posting.
 - Platform default and merchant-specific versioned fee policies.
-- Immutable fee snapshots stored on each payment.
+- Immutable fee snapshots stored on each MWK payment.
 - Provider-clearing, merchant-pending, and fee-revenue accounts.
 - Account debit/credit balance projections.
 - Controlled, dry-run-first historical successful-payment backfill.
+- Provider-neutral settlement reconciliation and bank-receipt posting after approval.
 
 Not implemented in this phase:
 
-- Provider-to-bank settlement postings or reconciliation.
+- Provider- or bank-specific statement parsers and external report format handling.
 - Merchant funds release from pending to available.
 - Withdrawals, refunds, chargebacks, reversals, or manual adjustments.
 - Merchant/admin ledger or balance API endpoints.
@@ -54,7 +55,7 @@ The Prisma schema contains these primary ledger models:
 
 V1 account keys are deterministic:
 
-- `provider-clearing:<currency>:<provider>` — asset, debit-normal. The MWK mappings for Airtel Money, TN Mpamba, and TEST are created by the migration and must be active before posting.
+- `provider-clearing:<currency>:<provider>` — asset, debit-normal. The MWK mappings for Airtel Money, TN Mpamba, TEST, and NOWPAYMENTS are created by migrations and must be active before posting.
 - `merchant-pending:<currency>:<merchantId>` — liability, credit-normal. Created when the merchant first receives a ledger posting.
 - `platform-fee-revenue:<currency>` — revenue, credit-normal. Created only when a nonzero fee is posted.
 
@@ -78,7 +79,7 @@ For example, for a MWK 1,000.00 payment with a MWK 20.00 merchant-absorbed fee:
 
 The debit of `100,000` equals the two credits (`98,000 + 2,000`). With the initial ZERO policy, the full amount is credited to merchant pending settlement and no zero-value revenue entry is created.
 
-The provider-clearing debit represents an amount receivable from the provider. Cash settlement, release to an available balance, and payment to a merchant are separate accounting events that are outside V1.
+The provider-clearing debit represents an amount receivable from the provider. Bank-receipt settlement posting clears this receivable against bank evidence. Release to an available balance and payment to a merchant remain separate accounting events that are not implemented.
 
 `LedgerAccountBalance` stores debit and credit totals independently. For a debit-normal account its displayed balance is `debitTotal - creditTotal`; for a credit-normal account it is `creditTotal - debitTotal`. The totals are updated in the posting transaction and must equal the corresponding sums of entries in `POSTED` ledger transactions. Ledger entries remain the accounting source of truth.
 
@@ -133,7 +134,7 @@ The report is created exclusively so an earlier report cannot be overwritten. By
 
 A payment is eligible only when it is `SUCCEEDED`, has a merchant and provider, has provider reference and processed time, has a matching `SUCCEEDED` attempt with provider reference and completion time, has a positive amount, and has an active provider-clearing account mapping. Non-success payment states (such as `CREATED`, `PROCESSING`, `FAILED`, and `PENDING_RECONCILIATION`), as well as successful but ambiguous records, are reported as excluded. Each eligible payment is uniquely posted as source `PAYMENT` / purpose `SUCCESS`, so a rerun does not duplicate a posting.
 
-For legacy payment records, the migration adds a zero-fee snapshot because this codebase had no reliable historical fee fields. It does not change original payment status, amount, or timestamps. Backfilled ledger transactions record `HISTORICAL_BACKFILL` provenance and a backfill timestamp. Each payment is applied in a separate database transaction; failed items are reported and can be retried safely.
+For legacy MWK payment records, the migration adds a zero-fee snapshot because this codebase had no reliable historical fee fields. It does not change original payment status, amount, or timestamps. Backfilled ledger transactions record `HISTORICAL_BACKFILL` provenance and a backfill timestamp. Each payment is applied in a separate database transaction; failed items are reported and can be retried safely.
 An existing non-`POSTED` transaction is reported and excluded; the command does not repair it automatically, so investigate and resolve it manually before retrying. Nonzero legacy `MerchantLedger` balances are reported separately and are never inferred as opening balances.
 
 To post, first review the dry-run report and obtain cutover/reconciliation approval, then explicitly use:
@@ -142,15 +143,15 @@ To post, first review the dry-run report and obtain cutover/reconciliation appro
 npm run ledger:backfill -- --apply
 ```
 
-Do not treat the resulting pending balances as authoritative until provider settlement, merchant release, withdrawals, refunds, and adjustments have been reconciled. The backfill does not convert, overwrite, or discard legacy `MerchantLedger` values; it reports nonzero records because their accounting meaning is not established by the old model. Pending and available amounts must not be conflated.
+Do not treat the resulting pending balances as available or withdrawable. The backfill does not convert, overwrite, or discard legacy `MerchantLedger` values; it reports nonzero records because their accounting meaning is not established by the old model. Pending and available amounts must not be conflated.
 
 Never run the apply mode against production without a reviewed report, a database backup/change plan, and financial reconciliation approval.
 
 ## 8. Migration and testing
 
-The schema and migration are in `prisma/schema.prisma` and `prisma/migrations/`. The migration adds fee/ledger tables and indexes, seeds the ZERO/MWK policy and provider clearing mappings, initializes legacy fee snapshots to zero, and installs database constraints/triggers for immutable snapshots, immutable posted entries, positive entry amounts, transaction balance, currency consistency, and active-policy uniqueness.
+The schema and migrations are in `prisma/schema.prisma` and `prisma/migrations/`. Across the migration set, the database adds fee/ledger and settlement tables, bank statement imports, allocation controls, crypto payment details/IPN history, and indexes; seeds the ZERO/MWK policy and provider-clearing mappings (including NOWPAYMENTS); initializes legacy fee snapshots to zero; and installs constraints/triggers for immutable snapshots, posted entries, balanced postings, allocation limits, and active-policy uniqueness.
 
-Unit tests use Vitest mocks and are not evidence of PostgreSQL locking or trigger behavior. Real payment-capture integration tests are in `src/ledger/payment-capture.postgres-spec.ts`. They require `LEDGER_TEST_DATABASE_URL`; there is deliberately no fallback to `DATABASE_URL`. The database name must contain `test`, and the test checks that migrations have seeded the active ZERO/MWK policy and TEST provider-clearing account. Tests create unique financial fixtures and do not delete or rewrite posted ledger records.
+Unit tests use Vitest mocks and are not evidence of PostgreSQL locking or trigger behavior. PostgreSQL integration tests include payment-capture, provider-settlement, and NOWPayments webhook cases under `src/ledger/`, `src/settlements/`, and `src/payment-providers/adapters/nowpayments/`. They require a dedicated test database; use `LEDGER_TEST_DATABASE_URL` where required by the ledger specs and configure Prisma's `DATABASE_URL` to the same test database. Never fall back to a development or production database.
 
 Create a dedicated local test database first (for example, execute `CREATE DATABASE solaris_ledger_test;` using a local PostgreSQL administrator client). Never use the configured development or production database. Set the test URL and the Prisma CLI's `DATABASE_URL` to that same test database in PowerShell, from `backend/`:
 
@@ -165,11 +166,11 @@ npm test -- src/ledger src/provider-callbacks/provider-callbacks.service.spec.ts
 npm run build
 ```
 
-The integration suite executes actual concurrent callback transactions and verifies callback idempotency, source uniqueness, transactional rollback, persisted fee snapshot immutability across policy changes, and balance projections against independently aggregated posted entries. The production-clearance decision still requires reconciliation and workflows outside this payment-capture scope. Never point test or migration commands at development or production databases.
+The integration suite exercises database-backed idempotency, concurrent posting, transactional rollback, persisted fee snapshots, settlement allocation constraints, and NOWPayments webhook behavior. It does not validate provider/bank parsers against real reports or establish production readiness. Never point test or migration commands at development or production databases.
 
 ## 9. Provider settlement infrastructure (Phase 2)
 
-The Phase 2 implementation is provider-neutral and supports settlement capture only. It does not implement provider settlement parsers, merchant fund release, withdrawals, refunds, or provider/bank reconciliation against real external formats.
+The Phase 2 implementation is provider-neutral and supports normalized settlement imports, matching, bank allocation, approval, and settlement capture. It does not implement provider settlement parsers or bank reconciliation against real external formats, nor merchant fund release, withdrawals, or refunds.
 
 Normalized provider imports preserve:
 
@@ -212,3 +213,9 @@ POST /admin/settlements/:batchId/post
 ```
 
 These normalized endpoints do not decode source-provider or bank-specific report formats. Actual parsers must remain separate integration adapters until sanitized samples and specifications are available.
+
+## 10. Crypto payment postings
+
+NOWPayments capture uses a separate native-asset ledger (`CryptoLedgerAccount`, `CryptoLedgerTransaction`, `CryptoLedgerEntry`, and `CryptoLedgerAccountBalance`) rather than converting `actually_paid` back to MWK. Crypto requests persist the merchant's exact asset, network, and decimal-string amount before provider initiation. `CryptoLedgerPostingService` debits provider crypto clearing and credits the merchant's crypto liability; a nonzero fee adds a platform crypto revenue credit. The payment state, crypto detail, and posting are updated in the same Prisma transaction.
+
+`NOWPAYMENTS_FEE_BPS` controls the merchant-absorbed crypto fee against the provider-reported `actually_paid` amount. It is an integer basis-point setting from 0 to 9999; the default is `0` to preserve current behavior until a rate is approved. The crypto fee is separate from the MWK fee-policy snapshot, and this ledger does not expose a merchant balance or withdrawal API.

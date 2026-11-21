@@ -13,8 +13,17 @@ export default registerAs('nowpayments', () => {
     'https://api.nowpayments.io/v1'
   ).replace(/\/+$/, '');
   const publicApiBaseUrl = process.env.PUBLIC_API_BASE_URL?.trim().replace(/\/+$/, '');
+  const cryptoFeeBps = Number(process.env.NOWPAYMENTS_FEE_BPS ?? 0);
 
   const isProd = process.env.NODE_ENV === 'production';
+
+  if (
+    !Number.isInteger(cryptoFeeBps) ||
+    cryptoFeeBps < 0 ||
+    cryptoFeeBps >= 10_000
+  ) {
+    throw new Error('NOWPAYMENTS_FEE_BPS must be an integer from 0 to 9999.');
+  }
 
   if (isProd) {
     if (!apiKey) {
@@ -39,9 +48,6 @@ export default registerAs('nowpayments', () => {
     ipnSecret,
     baseUrl,
     publicApiBaseUrl,
-    // NOWPayments doesn't support MWK as price_currency. We always quote
-    // against this currency and persist the FX rate used — see fx-rate.provider.ts.
-    settlementPriceCurrency: (process.env.NOWPAYMENTS_PRICE_CURRENCY?.trim() || 'usd').toLowerCase(),
-    maxFxQuoteAgeSeconds: Number(process.env.NOWPAYMENTS_MAX_FX_QUOTE_AGE_SECONDS ?? 300),
+    cryptoFeeBps,
   };
 });

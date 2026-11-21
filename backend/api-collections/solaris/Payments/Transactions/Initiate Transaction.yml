@@ -1,0 +1,28 @@
+info:
+  name: Initiate Transaction
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/transactions"
+  headers:
+    - name: Idempotency-Key
+      value: solaris-test-001
+  body:
+    type: json
+    data: |-
+      {
+        "amountTambala": 15000,
+        "customerPhone": "+265991234567",
+        "description": "Solaris TEST provider integration",
+        "merchantReference": "TEST-001"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

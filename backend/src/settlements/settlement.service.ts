@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import {
   PaymentStatus,
+  PaymentType,
   SettlementAllocationStatus,
   SettlementAuditEventType,
   AdminRole,
@@ -291,8 +292,15 @@ export class SettlementService {
             where: {
               provider: batch.provider,
               providerReference: item.providerPaymentReference,
+              paymentType: PaymentType.MWK,
             },
-            select: { id: true, status: true, currency: true, amountTambala: true, merchantNetTambala: true },
+            select: {
+              id: true,
+              status: true,
+              mwkDetail: {
+                select: { currency: true, amountTambala: true },
+              },
+            },
           });
           if (matches.length === 0) {
             unresolved = true;
@@ -312,10 +320,10 @@ export class SettlementService {
             if (payment.status !== PaymentStatus.SUCCEEDED) {
               status = SettlementItemMatchStatus.UNMATCHED;
               unresolved = true;
-            } else if (payment.currency !== item.currency) {
+            } else if (!payment.mwkDetail || payment.mwkDetail.currency !== item.currency) {
               status = SettlementItemMatchStatus.CURRENCY_MISMATCH;
               unresolved = true;
-            } else if (BigInt(payment.amountTambala) !== item.grossAmountTambala) {
+            } else if (BigInt(payment.mwkDetail.amountTambala) !== item.grossAmountTambala) {
               status = SettlementItemMatchStatus.AMOUNT_MISMATCH;
               unresolved = true;
             }

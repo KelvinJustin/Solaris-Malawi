@@ -1,0 +1,30 @@
+info:
+  name: Pay for Transaction
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/checkout/:token/pay"
+  headers:
+    - name: Content-Type
+      value: application/json
+  params:
+    - name: token
+      value: replace-with-checkout-token
+      type: path
+  body:
+    type: json
+    data: |-
+      {
+        "provider": "TEST",
+        "phoneNumber": "+265991234567"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

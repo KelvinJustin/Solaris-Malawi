@@ -34,7 +34,7 @@ export interface MappedCryptoStatus {
  *   something this function reverses. We do not map a success back to a
  *   failure here — that would silently corrupt a transaction that may
  *   already be posted to the ledger. The guarded update in
- *   nowpayments-webhook.service.ts (matching only `where: { status:
+ *   provider-callbacks.service.ts (matching only `where: { status:
  *   PaymentStatus.PROCESSING }`) will simply no-op once the transaction has
  *   already reached SUCCEEDED, and the event still lands in
  *   CryptoPaymentIpnEvent for a human to action as a ledger reversal.

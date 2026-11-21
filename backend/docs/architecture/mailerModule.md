@@ -1,165 +1,66 @@
+# Email Module
 
-The transporter is created once in the constructor and reused across all
-`sendEmail` calls — Nodemailer manages the connection pool internally.
+## Overview
 
----
+`EmailModule` provides a shared Nodemailer SMTP service used by merchant registration and login verification. It sends plain-text messages and is not backed by a queue or delivery-tracking store.
 
-## 5. API
+The module is registered in `src/app.module.ts` and provides `EmailService` to the merchant-auth feature.
 
-### 5.1 `sendEmail(to, subject, text)`
+## Configuration
 
-Generic send method. All specific email methods delegate here.
+The transporter reads these settings through Nest `ConfigService`:
 
-```typescript
-await this.emailService.sendEmail(
-  'merchant@example.com',
-  'Subject line',
-  'Plain text body.',
-);
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `to` | `string` | Recipient address |
-| `subject` | `string` | Email subject line |
-| `text` | `string` | Plain-text body |
-
-Returns the Nodemailer `SentMessageInfo` object. Throws on SMTP failure —
-callers are responsible for catching and handling the error.
-
-> **HTML support:** `sendEmail` currently sends plain text only. To add HTML,
-> extend the signature with an optional `html` parameter and pass it to
-> `sendMail`. Plain text should always accompany HTML as a fallback.
-
----
-
-### 5.2 `sendVerificationCode(to, code)`
-
-Sends the 6-digit OTP issued during merchant registration.
-
-```typescript
-await this.emailService.sendVerificationCode('merchant@example.com', '048291');
-```
-
-**Subject:** `Verify your Solaris email`
-
-**Behaviour in `AuthService`:**
-- Called after the merchant record and `OtpChallenge` are created.
-- The raw `code` is passed here; the hashed version is what is stored in the
-  database — this service never sees or stores the hash.
-- If this throws, the registration still completes (the merchant exists in the
-  DB). The merchant will need to request a new code. Will wrap in a
-  try/catch and returning a warning if delivery cannot be confirmed later today.
-
----
-
-### 5.3 `sendLoginCode(to, code)`
-
-Sends the 6-digit OTP for the second factor of the login flow.
-
-```typescript
-await this.emailService.sendLoginCode('merchant@example.com', '739102');
-```
-
-**Subject:** `Your Solaris login verification code`
-
-**Behaviour in `AuthService`:**
-- The `OtpChallenge` row is written to the database **before** this is called.
-- If this throws, `AuthService.login()` immediately marks the challenge as
-  consumed (`consumedAt: new Date()`) so the undelivered code can never be
-  verified. A `503 Service Unavailable` is returned to the caller.
-
----
-
-## 6. Error Handling
-
-`sendEmail` re-throws whatever Nodemailer raises. Each call site handles
-failures differently:
-
-| Call site | On failure |
+| Environment variable | Purpose |
 |---|---|
-| `sendVerificationCode` (registration) | Currently unhandled — registration succeeds but the merchant won't receive the code. Wrap in try/catch and surface a warning. |
-| `sendLoginCode` (login) | Caught in `AuthService.login()` — the challenge is consumed and `503` is returned. This is the safe pattern. |
+| `SMTP_SERVER` | SMTP hostname; required. |
+| `SMTP_PORT` | SMTP TCP port; required and validated as an integer from 1 to 65535. |
+| `SMTP_FROM` | Sender address; required when sending. |
+| `SMTP_USER` | Optional SMTP username. |
+| `SMTP_API_KEY` | Optional SMTP password/API key, used with `SMTP_USER`. |
+| `NODE_ENV` | In non-production mode, TLS negotiation is ignored to support local SMTP capture services. |
 
-Future email calls (approval notifications, settlement alerts) should follow
-the login pattern: decide upfront whether a send failure is fatal or
-degradable, and handle it explicitly.
+Port 465 enables Nodemailer's `secure` transport option. SMTP authentication is enabled only when both `SMTP_USER` and `SMTP_API_KEY` are configured. Never commit real SMTP credentials.
 
----
+At module initialization, the service verifies the SMTP transporter. A failure is logged and does not currently prevent the application from starting. Email send operations themselves propagate errors to their callers.
 
-## 7. Extending EmailService
+## Supported messages
 
-Add a new method for each new email type. Do not add logic to `sendEmail`
-itself — keep it generic.
+`EmailService` currently sends:
 
-```typescript
-// Example: merchant approval notification
-async sendApprovalNotification(to: string, businessName: string) {
-  return this.sendEmail(
-    to,
-    'Your Solaris account has been approved',
-    `Hi ${businessName},
+- Registration email verification codes, valid for 10 minutes.
+- Login second-factor codes, valid for 10 minutes.
 
-Your Solaris merchant account has been reviewed and approved.
-You can now accept payments.
+Messages are plain text. The service reuses a single transporter and exposes a generic `sendEmail(to, subject, text)` method plus the two OTP-specific methods.
 
-Log in to your dashboard: https://dashboard.Solaris.mw`,
-  );
-}
-```
+## Failure behavior
 
-Planned emails to add as the merchant module is built:
+Email send failures are handled differently by each auth flow:
 
-| Trigger | Method to add |
-|---|---|
-| Admin approves merchant | `sendApprovalNotification` |
-| Admin rejects merchant | `sendRejectionNotification` |
-| Admin suspends merchant | `sendSuspensionNotification` |
-| Settlement paid out | `sendSettlementReceipt` |
-| Payment received | `sendPaymentNotification` |
-| Password reset (future) | `sendPasswordResetCode` |
+- **Registration:** the merchant, initial profile, and verification challenge are committed before email is sent. If send fails, the request returns `503 Service Unavailable`; the account remains created and the user may request a new verification email.
+- **Login:** the login challenge is created before email send. If delivery fails, the challenge is marked consumed and the request returns `503`.
+- **Resend verification:** a delivery failure is surfaced by the auth service; the API does not claim delivery succeeded.
 
----
+There is no automatic retry, background queue, or delivery-status tracking. A `503` during registration does not mean the database transaction rolled back.
 
-## 8. Testing
+## Local development and tests
 
-For local development you can use [Mailpit](https://github.com/axllent/mailpit) or
-[Mailtrap](https://mailtrap.io) — both provide an SMTP server that captures
-outgoing mail without delivering it.
+Mailpit or another local SMTP capture service can be configured, for example:
 
 ```env
-# Mailpit defaults (runs on localhost)
-SMTP_SERVER=localhost
+SMTP_SERVER=127.0.0.1
 SMTP_PORT=1025
+SMTP_FROM="Solaris Malawi <no-reply@solaris.local>"
 SMTP_USER=
 SMTP_API_KEY=
-SMTP_FROM=Solaris <noreply@Solaris.mw>
 ```
 
-Mailpit's web UI is available at `http://localhost:8025` by default.
+The unit tests in `src/email/email.service.spec.ts` mock Nodemailer; they verify transport configuration, startup verification behavior, OTP message content, and invalid-port handling. They do not prove delivery through a real SMTP provider.
 
-You may use brevo to mimick production
+## Current scope
 
-To verify the transporter can reach the SMTP server on startup, add a
-`verifyTransporter()` call in an `onModuleInit` hook:
+Not implemented:
 
-```typescript
-async onModuleInit() {
-  await this.transporter.verify();
-}
-```
-
-Will remove this in production or guard it behind a non-production check — a
-failed verify on startup will crash the application.
-
----
-
-## 9. Current Limitations
-
-| # | Limitation |
-|---|---|
-| 1 | Plain text only — no HTML templates. will probably do that later otp test dont need a beefy email design for now |
-| 2 | No retry logic — a transient SMTP failure is a permanent failure for that send. will address today|
-| 3 | `sendVerificationCode` failure during registration is silently swallowed — the merchant is stuck without a code. Will address today|
-| 4 | No email queue — high send volume will block the event loop. sSolved using BullMQ + a worker for anything beyond low traffic. |
-| 5 | No delivery tracking — there is no record of whether an email was actually delivered. |
+- HTML templates.
+- Retry/backoff or an email queue.
+- Delivery/bounce tracking.
+- Approval, settlement, payment receipt, password-reset, or other notification types.

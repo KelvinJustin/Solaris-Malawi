@@ -16,23 +16,70 @@ import {
   PaymentStatus,
   CheckoutSessionStatus,
   AccountStatus,
+  PaymentType,
 } from '../generated/prisma/enums.js';
 
 import { PaymentProviderRegistry } from '../payment-providers/registry/payment-provider.registry.js';
 import { InitiateCheckoutPaymentDto } from './dto/initiate-checkout-payment.dto.js';
-import type {
-  ProviderInitiationResult,
-  CryptoInitiationResult,
-} from '../payment-providers/contracts/payment-provider.interface.js';
+import type { ProviderInitiationResult } from '../payment-providers/contracts/payment-provider.interface.js';
 import { DatabaseService } from '../database/database.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
 import { CheckoutTokenService } from './checkout-token.service.js';
 import { FeePolicyService } from '../ledger/fee-policy.service.js';
+import {
+  formatCryptoAmount,
+  resolveNowPaymentsCurrency,
+} from '../ledger/crypto-asset.util.js';
 
 // TODO: Add production logging for idempotency race conditions.
 
 const CHECKOUT_SESSION_MINUTES = 30;
+
+type CommonPaymentRequest = {
+  customerPhone: string | null;
+  description: string | null;
+  merchantReference: string | null;
+};
+
+type NormalizedPaymentRequest =
+  | (CommonPaymentRequest & {
+      paymentType: typeof PaymentType.MWK;
+      amountTambala: number;
+      currency: 'MWK';
+    })
+  | (CommonPaymentRequest & {
+      paymentType: typeof PaymentType.CRYPTO;
+      provider: typeof PaymentProvider.NOWPAYMENTS;
+      asset: string;
+      network: string | null;
+      amount: string;
+      providerCurrency: string;
+    });
+
+type PaymentWithDetails = {
+  id: string;
+  publicReference: string;
+  status: PaymentStatus;
+  paymentType: PaymentType;
+  provider: PaymentProvider | null;
+  customerPhone: string | null;
+  description: string | null;
+  merchantReference: string | null;
+  mwkDetail: { amountTambala: number; currency: string } | null;
+  cryptoDetail: {
+    asset: string;
+    network: string | null;
+    requestedAmount: Prisma.Decimal;
+  } | null;
+};
+
+type ExistingPayment = PaymentWithDetails & {
+  checkoutSessions: {
+    tokenEncrypted: string;
+    expiresAt: Date;
+  }[];
+};
 
 @Injectable()
 export class TransactionsService {
@@ -78,20 +125,73 @@ export class TransactionsService {
       );
     }
 
-    // Normalize optional fields so equivalent retries compare consistently.
-    const requestData = {
-      amountTambala: dto.amountTambala,
-      currency: 'MWK',
+    const paymentType = dto.paymentType ?? PaymentType.MWK;
+    const commonData = {
       customerPhone: dto.customerPhone?.trim() || null,
       description: dto.description?.trim() || null,
       merchantReference: dto.merchantReference?.trim() || null,
     };
 
-    // Reuse the transaction if this key was already used.
-    const existing = await this.findByIdempotencyKey(merchantId, key);
+    let requestData: NormalizedPaymentRequest;
 
+    if (paymentType === PaymentType.MWK) {
+      if (dto.amountTambala === undefined || dto.amount !== undefined) {
+        throw new BadRequestException(
+          'MWK payments require amountTambala and do not accept amount.',
+        );
+      }
+      if (
+        dto.provider !== undefined ||
+        dto.asset !== undefined ||
+        dto.network !== undefined
+      ) {
+        throw new BadRequestException(
+          'Crypto payment fields are only valid when paymentType is CRYPTO.',
+        );
+      }
+      requestData = {
+        paymentType,
+        amountTambala: dto.amountTambala,
+        currency: 'MWK',
+        ...commonData,
+      };
+    } else {
+      if (
+        dto.amount === undefined ||
+        dto.amountTambala !== undefined ||
+        dto.provider !== PaymentProvider.NOWPAYMENTS ||
+        !dto.asset
+      ) {
+        throw new BadRequestException(
+          'Crypto payments require provider NOWPAYMENTS, asset, and decimal-string amount.',
+        );
+      }
+
+      const asset = dto.asset.trim().toUpperCase();
+      const network = dto.network?.trim().toUpperCase() || null;
+      const providerCurrency = resolveNowPaymentsCurrency(asset, network);
+      if (!providerCurrency) {
+        throw new BadRequestException(
+          `The asset/network pair ${asset}/${network ?? 'NATIVE'} is not supported.`,
+        );
+      }
+
+      const amount = this.normalizeCryptoAmount(dto.amount);
+      requestData = {
+        paymentType,
+        provider: PaymentProvider.NOWPAYMENTS,
+        asset,
+        network,
+        amount,
+        providerCurrency,
+        ...commonData,
+      };
+    }
+
+    const normalizedRequest = requestData;
+    const existing = await this.findByIdempotencyKey(merchantId, key);
     if (existing) {
-      this.assertSameRequest(existing, requestData);
+      this.assertSameRequest(existing, normalizedRequest);
       return this.getCheckoutResponse(existing);
     }
 
@@ -103,21 +203,57 @@ export class TransactionsService {
     try {
       // The transaction and session either both persist or neither does.
       const payment = await this.databaseService.$transaction(async (tx) => {
-        const feeSnapshot = await this.feePolicyService.snapshotForPayment(tx, {
-          merchantId,
-          currency: requestData.currency,
-          amountTambala: BigInt(requestData.amountTambala),
-        });
-        const transaction = await tx.paymentTransaction.create({
-          data: {
-            publicReference: `sp_${randomUUID().replaceAll('-', '')}`,
-            merchantId,
-            ...requestData,
-            ...feeSnapshot,
-            idempotencyKey: key,
-            status: PaymentStatus.CREATED,
-          },
-        });
+        const transaction =
+          normalizedRequest.paymentType === PaymentType.MWK
+            ? await (async () => {
+                const feeSnapshot =
+                  await this.feePolicyService.snapshotForPayment(tx, {
+                    merchantId,
+                    currency: normalizedRequest.currency,
+                    amountTambala: BigInt(normalizedRequest.amountTambala),
+                  });
+                return tx.paymentTransaction.create({
+                  data: {
+                    publicReference: `sp_${randomUUID().replaceAll('-', '')}`,
+                    merchantId,
+                    paymentType: PaymentType.MWK,
+                    customerPhone: normalizedRequest.customerPhone,
+                    description: normalizedRequest.description,
+                    merchantReference: normalizedRequest.merchantReference,
+                    idempotencyKey: key,
+                    status: PaymentStatus.CREATED,
+                    mwkDetail: {
+                      create: {
+                        amountTambala: normalizedRequest.amountTambala,
+                        ...feeSnapshot,
+                      },
+                    },
+                  },
+                  include: { mwkDetail: true, cryptoDetail: true },
+                });
+              })()
+            : await tx.paymentTransaction.create({
+                data: {
+                  publicReference: `sp_${randomUUID().replaceAll('-', '')}`,
+                  merchantId,
+                  paymentType: PaymentType.CRYPTO,
+                  provider: PaymentProvider.NOWPAYMENTS,
+                  customerPhone: normalizedRequest.customerPhone,
+                  description: normalizedRequest.description,
+                  merchantReference: normalizedRequest.merchantReference,
+                  idempotencyKey: key,
+                  status: PaymentStatus.CREATED,
+                  cryptoDetail: {
+                    create: {
+                      asset: normalizedRequest.asset,
+                      network: normalizedRequest.network,
+                      requestedAmount: normalizedRequest.amount,
+                      providerCurrency: normalizedRequest.providerCurrency,
+                    },
+                  },
+                },
+                include: { mwkDetail: true, cryptoDetail: true },
+              });
 
         await tx.checkoutSession.create({
           data: {
@@ -133,10 +269,7 @@ export class TransactionsService {
       });
 
       return {
-        publicReference: payment.publicReference,
-        status: payment.status,
-        amountTambala: payment.amountTambala,
-        currency: payment.currency,
+        ...this.paymentAmountResponse(payment),
         checkout_url: checkoutUrl,
         expires_at: expiresAt,
       };
@@ -149,7 +282,7 @@ export class TransactionsService {
         const concurrent = await this.findByIdempotencyKey(merchantId, key);
 
         if (concurrent) {
-          this.assertSameRequest(concurrent, requestData);
+          this.assertSameRequest(concurrent, normalizedRequest);
           return this.getCheckoutResponse(concurrent);
         }
       }
@@ -174,6 +307,8 @@ export class TransactionsService {
         },
       },
       include: {
+        mwkDetail: true,
+        cryptoDetail: true,
         checkoutSessions: {
           where: {
             status: CheckoutSessionStatus.ACTIVE,
@@ -194,27 +329,29 @@ export class TransactionsService {
    * from mutating the meaning of the original transaction.
    */
   private assertSameRequest(
-    existing: {
-      amountTambala: number;
-      currency: string;
-      customerPhone: string | null;
-      description: string | null;
-      merchantReference: string | null;
-    },
-    requestData: {
-      amountTambala: number;
-      currency: string;
-      customerPhone: string | null;
-      description: string | null;
-      merchantReference: string | null;
-    },
+    existing: ExistingPayment,
+    requestData: NormalizedPaymentRequest,
   ): void {
-    const sameRequest =
-      existing.amountTambala === requestData.amountTambala &&
-      existing.currency === requestData.currency &&
+    const sameCommonFields =
       existing.customerPhone === requestData.customerPhone &&
       existing.description === requestData.description &&
       existing.merchantReference === requestData.merchantReference;
+
+    const sameAmount =
+      requestData.paymentType === PaymentType.MWK
+        ? existing.paymentType === PaymentType.MWK &&
+          existing.mwkDetail?.amountTambala === requestData.amountTambala
+        : existing.paymentType === PaymentType.CRYPTO &&
+          existing.provider === PaymentProvider.NOWPAYMENTS &&
+          existing.cryptoDetail?.asset === requestData.asset &&
+          existing.cryptoDetail?.network === requestData.network &&
+          existing.cryptoDetail !== null &&
+          existing.cryptoDetail.requestedAmount.equals(requestData.amount);
+
+    const sameRequest =
+      sameCommonFields &&
+      existing.paymentType === requestData.paymentType &&
+      sameAmount;
 
     if (!sameRequest) {
       throw new ConflictException(
@@ -231,17 +368,7 @@ export class TransactionsService {
    * new checkout URL; it exposes the current state instead so the caller can
    * decide how to recover.
    */
-  private async getCheckoutResponse(transaction: {
-    id: string;
-    publicReference: string;
-    status: PaymentStatus;
-    amountTambala: number;
-    currency: string;
-    checkoutSessions: {
-      tokenEncrypted: string;
-      expiresAt: Date;
-    }[];
-  }) {
+  private async getCheckoutResponse(transaction: ExistingPayment) {
     const now = new Date();
     const session = transaction.checkoutSessions[0];
 
@@ -251,10 +378,7 @@ export class TransactionsService {
       );
 
       return {
-        publicReference: transaction.publicReference,
-        status: transaction.status,
-        amountTambala: transaction.amountTambala,
-        currency: transaction.currency,
+        ...this.paymentAmountResponse(transaction),
         checkout_url: this.buildCheckoutUrl(token),
         expires_at: session.expiresAt,
       };
@@ -263,13 +387,57 @@ export class TransactionsService {
     // Do not reopen a payment that is already processing, succeeded,
     // failed, or awaiting reconciliation. Recovery needs a separate policy.
     return {
-      publicReference: transaction.publicReference,
-      status: transaction.status,
-      amountTambala: transaction.amountTambala,
-      currency: transaction.currency,
+      ...this.paymentAmountResponse(transaction),
       checkout_url: null,
       expires_at: null,
     };
+  }
+
+  private paymentAmountResponse(transaction: PaymentWithDetails) {
+    if (transaction.paymentType === PaymentType.MWK && transaction.mwkDetail) {
+      return {
+        publicReference: transaction.publicReference,
+        status: transaction.status,
+        amountTambala: transaction.mwkDetail.amountTambala,
+        currency: transaction.mwkDetail.currency,
+      };
+    }
+    if (
+      transaction.paymentType === PaymentType.CRYPTO &&
+      transaction.cryptoDetail
+    ) {
+      return {
+        publicReference: transaction.publicReference,
+        status: transaction.status,
+        paymentType: PaymentType.CRYPTO,
+        provider: PaymentProvider.NOWPAYMENTS,
+        asset: transaction.cryptoDetail.asset,
+        network: transaction.cryptoDetail.network,
+        amount: formatCryptoAmount(
+          transaction.cryptoDetail.requestedAmount.toFixed(),
+        ),
+      };
+    }
+    throw new InternalServerErrorException(
+      'Payment transaction is missing its matching financial detail.',
+    );
+  }
+
+  private normalizeCryptoAmount(amount: string): string {
+    if (!/^(?:0|[1-9]\d{0,17})(?:\.\d{1,18})?$/.test(amount)) {
+      throw new BadRequestException(
+        'Crypto amount must be a positive decimal string with at most 18 fractional digits.',
+      );
+    }
+    const decimal = new Prisma.Decimal(amount);
+    if (!decimal.isPositive()) {
+      throw new BadRequestException('Crypto amount must be greater than zero.');
+    }
+    const [whole, fraction] = amount.split('.');
+    const normalizedFraction = fraction?.replace(/0+$/, '');
+    return normalizedFraction
+      ? `${BigInt(whole).toString()}.${normalizedFraction}`
+      : BigInt(whole).toString();
   }
 
   /**
@@ -338,8 +506,11 @@ export class TransactionsService {
         },
         select: {
           publicReference: true,
-          amountTambala: true,
-          currency: true,
+          paymentType: true,
+          mwkDetail: { select: { amountTambala: true, currency: true } },
+          cryptoDetail: {
+            select: { asset: true, network: true, requestedAmount: true },
+          },
           status: true,
           provider: true,
           description: true,
@@ -354,7 +525,42 @@ export class TransactionsService {
       throw new NotFoundException('Transaction not found.');
     }
 
-    return transaction;
+    if (transaction.paymentType === PaymentType.MWK && transaction.mwkDetail) {
+      return {
+        publicReference: transaction.publicReference,
+        amountTambala: transaction.mwkDetail.amountTambala,
+        currency: transaction.mwkDetail.currency,
+        status: transaction.status,
+        provider: transaction.provider,
+        description: transaction.description,
+        merchantReference: transaction.merchantReference,
+        createdAt: transaction.createdAt,
+        processedAt: transaction.processedAt,
+      };
+    }
+    if (
+      transaction.paymentType === PaymentType.CRYPTO &&
+      transaction.cryptoDetail
+    ) {
+      return {
+        publicReference: transaction.publicReference,
+        paymentType: PaymentType.CRYPTO,
+        provider: PaymentProvider.NOWPAYMENTS,
+        asset: transaction.cryptoDetail.asset,
+        network: transaction.cryptoDetail.network,
+        amount: formatCryptoAmount(
+          transaction.cryptoDetail.requestedAmount.toFixed(),
+        ),
+        status: transaction.status,
+        description: transaction.description,
+        merchantReference: transaction.merchantReference,
+        createdAt: transaction.createdAt,
+        processedAt: transaction.processedAt,
+      };
+    }
+    throw new InternalServerErrorException(
+      'Payment transaction is missing its matching financial detail.',
+    );
   }
 
   /**
@@ -372,13 +578,7 @@ export class TransactionsService {
       where: { tokenHash },
       include: {
         transaction: {
-          select: {
-            publicReference: true,
-            amountTambala: true,
-            currency: true,
-            description: true,
-            status: true,
-          },
+          include: { mwkDetail: true, cryptoDetail: true },
         },
       },
     });
@@ -405,14 +605,12 @@ export class TransactionsService {
 
     const transaction = session.transaction;
 
+    const payment = this.paymentAmountResponse(transaction);
+    const { publicReference: _publicReference, ...paymentDetails } = payment;
     return {
       reference: transaction.publicReference,
-      amountTambala: transaction.amountTambala,
-      currency: transaction.currency,
+      ...paymentDetails,
       description: transaction.description,
-      status: transaction.status,
-
-      // Only a newly created transaction can proceed to payment selection.
       canPay: transaction.status === PaymentStatus.CREATED,
     };
   }
@@ -453,7 +651,9 @@ export class TransactionsService {
     const session = await this.databaseService.checkoutSession.findUnique({
       where: { tokenHash },
       include: {
-        transaction: true,
+        transaction: {
+          include: { mwkDetail: true, cryptoDetail: true },
+        },
       },
     });
 
@@ -474,7 +674,16 @@ export class TransactionsService {
       );
     }
 
-    const isCrypto = provider === PaymentProvider.NOWPAYMENTS;
+    const isCrypto = transaction.paymentType === PaymentType.CRYPTO;
+    if (
+      (isCrypto && provider !== PaymentProvider.NOWPAYMENTS) ||
+      (!isCrypto && provider === PaymentProvider.NOWPAYMENTS)
+    ) {
+      throw new BadRequestException(
+        'The selected provider does not match this transaction payment type.',
+      );
+    }
+
     let phoneNumber: string | undefined;
 
     if (!isCrypto) {
@@ -483,10 +692,6 @@ export class TransactionsService {
       }
 
       phoneNumber = (transaction.customerPhone || dto.phoneNumber)!.trim();
-    } else if (!dto.payCurrency?.trim()) {
-      throw new BadRequestException(
-        'payCurrency is required for crypto payments.',
-      );
     }
 
     // Resolve the adapter before claiming the session.
@@ -517,7 +722,7 @@ export class TransactionsService {
         where: {
           id: transaction.id,
           status: PaymentStatus.CREATED,
-          provider: null,
+          provider: isCrypto ? PaymentProvider.NOWPAYMENTS : null,
         },
         data: {
           status: PaymentStatus.PROCESSING,
@@ -543,15 +748,31 @@ export class TransactionsService {
     });
 
     // Do not hold a database transaction open during network I/O.
+    const mwkDetail = transaction.mwkDetail;
+    const cryptoDetail = transaction.cryptoDetail;
+    if (isCrypto && !cryptoDetail) {
+      throw new InternalServerErrorException(
+        'Crypto transaction is missing its crypto payment detail.',
+      );
+    }
+    if (!isCrypto && !mwkDetail) {
+      throw new InternalServerErrorException(
+        'MWK transaction is missing its MWK payment detail.',
+      );
+    }
+
     const result: ProviderInitiationResult = isCrypto
       ? await adapter.initiatePayment({
           provider: PaymentProvider.NOWPAYMENTS,
           transactionReference: transaction.publicReference,
           attemptReference: attempt.id,
-          amountTambala: transaction.amountTambala,
-          currency: 'MWK',
-          payCurrency: dto.payCurrency!,
-          network: dto.network ?? '',
+          transactionId: transaction.id,
+          requestedAmount: formatCryptoAmount(
+            cryptoDetail!.requestedAmount.toFixed(),
+          ),
+          providerCurrency: cryptoDetail!.providerCurrency,
+          asset: cryptoDetail!.asset,
+          network: cryptoDetail!.network,
         })
       : await adapter.initiatePayment({
           provider: provider as Exclude<
@@ -560,7 +781,7 @@ export class TransactionsService {
           >,
           transactionReference: transaction.publicReference,
           attemptReference: attempt.id,
-          amountTambala: transaction.amountTambala,
+          amountTambala: mwkDetail!.amountTambala,
           currency: 'MWK',
           phoneNumber: phoneNumber!,
         });
@@ -588,8 +809,8 @@ export class TransactionsService {
       payment_instructions?: {
         paymentAddress: string;
         payAmount: string;
-        payCurrency: string;
-        network: string;
+        asset: string;
+        network: string | null;
         expiresAt: Date | null;
       };
     } = {
@@ -603,17 +824,17 @@ export class TransactionsService {
     // response IS the payment instructions. Only attach them when the
     // invoice was actually created; a REJECTED/UNKNOWN crypto result has
     // nothing to show the customer.
-    if (isCrypto && result.outcome === 'ACCEPTED') {
-      const cryptoResult = result as CryptoInitiationResult & {
-        outcome: 'ACCEPTED';
-      };
-
+    if (
+      isCrypto &&
+      result.outcome === 'ACCEPTED' &&
+      'paymentAddress' in result
+    ) {
       response.payment_instructions = {
-        paymentAddress: cryptoResult.paymentAddress,
-        payAmount: cryptoResult.payAmount,
-        payCurrency: cryptoResult.payCurrency,
-        network: cryptoResult.network,
-        expiresAt: cryptoResult.expiresAt,
+        paymentAddress: result.paymentAddress,
+        payAmount: result.payAmount,
+        asset: result.asset,
+        network: result.network,
+        expiresAt: result.expiresAt,
       };
     }
 
@@ -631,7 +852,7 @@ export class TransactionsService {
    * For mobile money this callback is the provider's synchronous HTTP
    * response. For crypto it is still just the "invoice created" response —
    * ACCEPTED here means PROCESSING, not SUCCEEDED. The NOWPayments webhook
-   * handler (nowpayments-webhook.service.ts) is what later moves a crypto
+   * handler in provider-callbacks is what later moves a crypto
    * transaction from PROCESSING to SUCCEEDED/FAILED, using this exact same
    * guarded-update idiom so the two can never race each other into a bad
    * state.

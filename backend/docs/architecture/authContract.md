@@ -415,5 +415,6 @@ The backend must:
 - [ ] Missing, invalid, or expired token returns `401` on protected endpoints.
 - [ ] Logout clears the cookie and revokes the token (replaying it returns `401`).
 - [ ] `/auth/me` returns `401` after logout.
+- [ ] Account deletion soft-deletes the authenticated merchant and prevents further authenticated use.
 - [ ] Network failures are handled separately from auth failures.
 - [ ] Credentialed CORS works from the configured React origin.

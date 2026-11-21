@@ -24,16 +24,18 @@ export interface MobileMoneyInitiationInput {
 /**
  * Crypto initiation input.
  *
- * The merchant transaction remains denominated in MWK.
+ * The merchant amount is denominated in the selected asset. NOWPayments'
+ * required fiat price is a provider-only reference and does not change it.
  */
 export interface CryptoInitiationInput {
     provider: typeof PaymentProvider.NOWPAYMENTS;
     transactionReference: string;
     attemptReference: string;
-    amountTambala: number;
-    currency: 'MWK';
-    payCurrency: string;
-    network: string;
+    transactionId: string;
+    requestedAmount: string;
+    providerCurrency: string;
+    asset: string;
+    network: string | null;
 }
 
 /**
@@ -74,8 +76,8 @@ export type CryptoInitiationResult =
         providerReference: string;
         paymentAddress: string;
         payAmount: string;
-        payCurrency: string;
-        network: string;
+        asset: string;
+        network: string | null;
         expiresAt: Date | null;
     }
     | {
