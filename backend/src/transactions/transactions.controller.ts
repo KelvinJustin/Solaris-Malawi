@@ -5,21 +5,19 @@ import {
   Headers,
   Post,
   UseGuards,
-  Param
+  Param,
 } from '@nestjs/common';
 
 import { TransactionsService } from './transactions.service.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
-import { CurrentUser } from '../auth/current-user.decorator.js';
+import { JwtAuthGuard } from '../auth/merchant-auth/jwt-auth.guard.js';
+import { CurrentUser } from '../auth/merchant-auth/current-user.decorator.js';
 import { ArcjetGuard } from '../arcjet/arcjet.guard.js';
 
 @UseGuards(ArcjetGuard, JwtAuthGuard)
 @Controller('transactions')
 export class TransactionsController {
-  constructor(
-    private readonly transactionsService: TransactionsService,
-  ) { }
+  constructor(private readonly transactionsService: TransactionsService) {}
 
   /**
    * Creates a payment transaction for the currently authenticated merchant.

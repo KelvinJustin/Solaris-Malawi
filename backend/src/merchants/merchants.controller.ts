@@ -13,8 +13,8 @@ import { MerchantsService } from './merchants.service.js';
 import { MerchantDocumentsService } from './merchant-documents.service.js';
 import { RequestDocumentUploadDto } from './dto/request-document-upload.dto.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
-import { CurrentUser } from '../auth/current-user.decorator.js';
+import { JwtAuthGuard } from '../auth/merchant-auth/jwt-auth.guard.js';
+import { CurrentUser } from '../auth/merchant-auth/current-user.decorator.js';
 
 @UseGuards(JwtAuthGuard)
 @Controller('merchants')
@@ -22,7 +22,7 @@ export class MerchantsController {
   constructor(
     private readonly merchantsService: MerchantsService,
     private readonly merchantDocumentsService: MerchantDocumentsService,
-  ) { }
+  ) {}
 
   // ============================================================
   // PROFILE
@@ -95,10 +95,7 @@ export class MerchantsController {
    */
   // GET /merchants/documents
   @Get('documents')
-  listDocuments(
-    @CurrentUser('userId') merchantId: string,
-  ) {
+  listDocuments(@CurrentUser('userId') merchantId: string) {
     return this.merchantDocumentsService.listDocuments(merchantId);
   }
-
 }

@@ -1,21 +1,19 @@
-import { IsEnum, IsPhoneNumber, IsString, MaxLength } from 'class-validator';
-
+import { IsEnum, IsOptional, IsString, ValidateIf } from 'class-validator';
 import { PaymentProvider } from '../../generated/prisma/enums.js';
 
-/**
- * Customer input for initiating a hosted checkout payment.
- *
- * The server retrieves the transaction amount and reference
- * from the database; the client cannot override either value.
- */
 export class InitiateCheckoutPaymentDto {
-    /** Provider selected by the customer on the checkout page. */
-    @IsEnum(PaymentProvider)
-    provider!: PaymentProvider;
+  @IsEnum(PaymentProvider)
+  provider!: PaymentProvider;
 
-    /** Malawian phone number to receive the payment prompt. */
-    @IsString()
-    @MaxLength(30)
-    @IsPhoneNumber('MW')
-    phoneNumber!: string;
+  @ValidateIf((dto: InitiateCheckoutPaymentDto) => dto.provider !== PaymentProvider.NOWPAYMENTS)
+  @IsString()
+  phoneNumber?: string; // required for mobile-money providers, absent for NOWPAYMENTS
+
+  @ValidateIf((dto: InitiateCheckoutPaymentDto) => dto.provider === PaymentProvider.NOWPAYMENTS)
+  @IsString()
+  payCurrency?: string; // e.g. "usdttrc20" — required, and only meaningful, for NOWPAYMENTS
+
+  @IsOptional()
+  @IsString()
+  network?: string;
 }

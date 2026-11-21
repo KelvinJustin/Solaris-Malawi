@@ -4,24 +4,27 @@ import { LoggerModule } from 'nestjs-pino';
 import { createRequestId } from './logging/request-id.js';
 import { createPinoTargets } from './logging/pino-targets.js';
 import { AppController } from './app.controller.js';
-import { AppService } from './app.service.js';
 import { DatabaseModule } from './database/database.module.js';
 import { MerchantsModule } from './merchants/merchants.module.js';
-import { AuthModule } from './auth/auth.module.js';
+import { AuthModule } from './auth/merchant-auth/auth.module.js';
 import { EmailModule } from './email/email.module.js';
 import { ArcjetModule } from './arcjet/arcjet.module.js';
 import { AdminModule } from './admin/admin.module.js';
-import { AdminAuthModule } from './admin-auth/admin-auth.module.js';
+import { AdminAuthModule } from './auth/admin-auth/admin-auth.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
 import { PaymentProvidersModule } from './payment-providers/payment-providers.module.js';
 import { ProviderCallbacksModule } from './provider-callbacks/provider-callbacks.module.js';
 import { StorageModule } from './storage/storage.module.js';
-import { AnalyticsModule } from './analytics/analytics.module.js';
 import { SettlementsModule } from './settlements/settlements.module.js';
+import fxConfig from './config/fx.config.js';
+import nowpaymentsConfig from './config/nowpayments.config.js';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [fxConfig, nowpaymentsConfig],
+    }),
     LoggerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -90,10 +93,8 @@ import { SettlementsModule } from './settlements/settlements.module.js';
     PaymentProvidersModule,
     ProviderCallbacksModule,
     StorageModule,
-    AnalyticsModule,
     SettlementsModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
 })
 export class AppModule {}

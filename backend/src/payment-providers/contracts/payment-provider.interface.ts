@@ -2,36 +2,51 @@
 import { PaymentProvider } from '../../generated/prisma/enums.js';
 
 /**
- * Information solaris supplies when asking a provider to initiate a payment.
- *
- * Amounts are expressed in tambala, not MWK decimal values.
+ * Providers that initiate mobile-money payments.
  */
-export interface InitiatePaymentInput {
-    /** Solaris's stable public transaction reference. */
+type MobileMoneyProvider =
+    | typeof PaymentProvider.AIRTEL_MONEY
+    | typeof PaymentProvider.TN_MPAMBA
+    | typeof PaymentProvider.TEST;
+
+/**
+ * Mobile-money initiation input.
+ */
+export interface MobileMoneyInitiationInput {
+    provider: MobileMoneyProvider;
     transactionReference: string;
-
-    /** Unique identifier for this particular payment attempt. */
     attemptReference: string;
-
-    /** Amount in integer tambala (100 tambala = MWK 1.00). */
     amountTambala: number;
-
-    /** Solaris currently supports Malawian kwacha only. */
     currency: 'MWK';
-
-    /** Normalized Malawian mobile number. */
     phoneNumber: string;
 }
 
 /**
- * Result of the provider's initiation request.
+ * Crypto initiation input.
  *
- * ACCEPTED means the provider accepted the request, not that
- * the customer completed payment.
- *
- * UNKNOWN means the outcome cannot safely be determined.
+ * The merchant transaction remains denominated in MWK.
  */
-export type ProviderInitiationResult =
+export interface CryptoInitiationInput {
+    provider: typeof PaymentProvider.NOWPAYMENTS;
+    transactionReference: string;
+    attemptReference: string;
+    amountTambala: number;
+    currency: 'MWK';
+    payCurrency: string;
+    network: string;
+}
+
+/**
+ * Common input accepted by payment-provider adapters.
+ */
+export type InitiatePaymentInput =
+    | MobileMoneyInitiationInput
+    | CryptoInitiationInput;
+
+/**
+ * Mobile-money initiation results.
+ */
+export type MobileMoneyInitiationResult =
     | {
         outcome: 'ACCEPTED';
         providerReference: string;
@@ -48,10 +63,41 @@ export type ProviderInitiationResult =
     };
 
 /**
- * Contract every real or mock payment provider must implement.
+ * Crypto initiation results.
  *
- * Provider-specific HTTP requests, authentication, and response
- * parsing belong inside the relevant adapter.
+ * ACCEPTED means payment instructions were created,
+ * not that the customer completed payment.
+ */
+export type CryptoInitiationResult =
+    | {
+        outcome: 'ACCEPTED';
+        providerReference: string;
+        paymentAddress: string;
+        payAmount: string;
+        payCurrency: string;
+        network: string;
+        expiresAt: Date | null;
+    }
+    | {
+        outcome: 'REJECTED';
+        failureCode: string;
+        failureMessage: string;
+    }
+    | {
+        outcome: 'UNKNOWN';
+        failureCode: string;
+        failureMessage: string;
+    };
+
+/**
+ * Common result returned by provider adapters.
+ */
+export type ProviderInitiationResult =
+    | MobileMoneyInitiationResult
+    | CryptoInitiationResult;
+
+/**
+ * Contract implemented by all payment-provider adapters.
  */
 export interface PaymentProviderAdapter {
     readonly provider: PaymentProvider;

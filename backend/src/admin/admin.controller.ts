@@ -12,19 +12,17 @@ import {
 
 import type { Request } from 'express';
 
-import { AdminJwtAuthGuard } from '../admin-auth/admin-jwt-auth.guard.js';
+import { AdminJwtAuthGuard } from '../auth/admin-auth/admin-jwt-auth.guard.js';
 import { AdminService } from './admin.service.js';
 import { AdminRole } from '../generated/prisma/enums.js';
-import { AdminRoles } from '../admin-auth/admin-roles.decorator.js';
-import { AdminRolesGuard } from '../admin-auth/admin-roles.guard.js';
+import { AdminRoles } from '../auth/admin-auth/admin-roles.decorator.js';
+import { AdminRolesGuard } from '../auth/admin-auth/admin-roles.guard.js';
 import { RejectMerchantApplicationDto } from './dto/reject-merchant-application.dto.js';
 
 @Controller('admin')
 @UseGuards(AdminJwtAuthGuard, AdminRolesGuard)
 export class AdminController {
-  constructor(
-    private readonly adminService: AdminService,
-  ) { }
+  constructor(private readonly adminService: AdminService) {}
 
   // Returns merchant applications awaiting compliance review.
   // Only authenticated admins can access this endpoint.
@@ -43,13 +41,9 @@ export class AdminController {
 
   @Get('merchant-applications/:profileId')
   @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.COMPLIANCE)
-  findMerchantApplicationById(
-    @Param('profileId') profileId: string,
-  ) {
+  findMerchantApplicationById(@Param('profileId') profileId: string) {
     // Delegate the lookup of a specific merchant application by its unique profile ID to the service layer.
-    return this.adminService.findMerchantApplicationById(
-      profileId,
-    );
+    return this.adminService.findMerchantApplicationById(profileId);
   }
 
   @Post('merchant-applications/:profileId/start-review')
@@ -93,7 +87,6 @@ export class AdminController {
     );
   }
 
-
   // Rejects a merchant application and records the reason.
   @Post('merchant-applications/:profileId/reject')
   @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.COMPLIANCE)
@@ -120,7 +113,6 @@ export class AdminController {
     );
   }
 
-
   @Get('merchant-applications/:profileId/documents/:documentId/preview')
   @UseGuards(AdminJwtAuthGuard, AdminRolesGuard)
   @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.COMPLIANCE)
@@ -128,11 +120,6 @@ export class AdminController {
     @Param('profileId') profileId: string,
     @Param('documentId') documentId: string,
   ) {
-    return this.adminService.createDocumentPreviewUrl(
-      profileId,
-      documentId,
-    );
+    return this.adminService.createDocumentPreviewUrl(profileId, documentId);
   }
-
-
 }
