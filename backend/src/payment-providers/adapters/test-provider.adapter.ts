@@ -51,6 +51,12 @@ export class TestProviderAdapter implements PaymentProviderAdapter {
 
         let response: Response;
 
+        if (!('phoneNumber' in input)) {
+            throw new Error(
+                'The test provider requires a mobile-money phone number.',
+            );
+        }
+
         try {
             response = await fetch(`${baseUrl}/initiate`, {
                 method: 'POST',

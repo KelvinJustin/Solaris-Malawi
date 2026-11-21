@@ -1,4 +1,3 @@
-
 import {
   BadRequestException,
   ConflictException,
@@ -6,11 +5,10 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
-  ServiceUnavailableException
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
-
 
 import {
   PaymentAttemptStatus,
@@ -22,7 +20,10 @@ import {
 
 import { PaymentProviderRegistry } from '../payment-providers/registry/payment-provider.registry.js';
 import { InitiateCheckoutPaymentDto } from './dto/initiate-checkout-payment.dto.js';
-import type { ProviderInitiationResult } from '../payment-providers/contracts/payment-provider.interface.js';
+import type {
+  ProviderInitiationResult,
+  CryptoInitiationResult,
+} from '../payment-providers/contracts/payment-provider.interface.js';
 import { DatabaseService } from '../database/database.service.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { CreateTransactionDto } from './dto/create-transaction.dto.js';
@@ -41,7 +42,7 @@ export class TransactionsService {
     private readonly configService: ConfigService,
     private readonly paymentProviderRegistry: PaymentProviderRegistry,
     private readonly feePolicyService: FeePolicyService,
-  ) { }
+  ) {}
 
   /**
    * Creates a merchant payment and its hosted checkout session.
@@ -145,10 +146,7 @@ export class TransactionsService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        const concurrent = await this.findByIdempotencyKey(
-          merchantId,
-          key,
-        );
+        const concurrent = await this.findByIdempotencyKey(merchantId, key);
 
         if (concurrent) {
           this.assertSameRequest(concurrent, requestData);
@@ -312,7 +310,9 @@ export class TransactionsService {
       }
 
       if (parsedUrl.search || parsedUrl.hash) {
-        throw new Error('The checkout base URL must not contain a query string or hash.');
+        throw new Error(
+          'The checkout base URL must not contain a query string or hash.',
+        );
       }
     } catch {
       throw new InternalServerErrorException(
@@ -330,8 +330,8 @@ export class TransactionsService {
    * intentionally not the internal primary key used by Prisma.
    */
   async findOne(merchantId: string, reference: string) {
-    const transaction =
-      await this.databaseService.paymentTransaction.findFirst({
+    const transaction = await this.databaseService.paymentTransaction.findFirst(
+      {
         where: {
           publicReference: reference,
           merchantId,
@@ -347,7 +347,8 @@ export class TransactionsService {
           createdAt: true,
           processedAt: true,
         },
-      });
+      },
+    );
 
     if (!transaction) {
       throw new NotFoundException('Transaction not found.');
@@ -355,7 +356,6 @@ export class TransactionsService {
 
     return transaction;
   }
-
 
   /**
    * Validates a hosted checkout token and returns the payment metadata that the
@@ -385,9 +385,7 @@ export class TransactionsService {
 
     // Use the same response for unknown and unavailable links.
     if (!session || session.status !== CheckoutSessionStatus.ACTIVE) {
-      throw new NotFoundException(
-        'Checkout link is invalid or unavailable.',
-      );
+      throw new NotFoundException('Checkout link is invalid or unavailable.');
     }
 
     // Expired links must not be used to start payments.
@@ -402,9 +400,7 @@ export class TransactionsService {
         },
       });
 
-      throw new NotFoundException(
-        'Checkout link is invalid or unavailable.',
-      );
+      throw new NotFoundException('Checkout link is invalid or unavailable.');
     }
 
     const transaction = session.transaction;
@@ -427,6 +423,14 @@ export class TransactionsService {
    * The checkout link and transaction are claimed atomically before any network
    * request is made. This prevents two concurrent requests from starting the
    * same payment and keeps provider callbacks deterministic.
+   *
+   * Mobile-money and crypto diverge sharply here: mobile money needs a phone
+   * number and nothing else, and its provider call resolves synchronously
+   * (accept/reject). Crypto needs a pay currency instead of a phone number,
+   * and "ACCEPTED" only means an invoice/address was generated — the real
+   * outcome arrives later via the NOWPayments IPN webhook. Both still share
+   * the same claim-then-call-then-reconcile skeleton, so the branching is
+   * kept local to this method rather than duplicating the whole flow.
    */
   async initiateCheckoutPayment(
     token: string,
@@ -458,9 +462,7 @@ export class TransactionsService {
       session.status !== CheckoutSessionStatus.ACTIVE ||
       session.expiresAt <= new Date()
     ) {
-      throw new NotFoundException(
-        'Checkout link is invalid or unavailable.',
-      );
+      throw new NotFoundException('Checkout link is invalid or unavailable.');
     }
 
     const transaction = session.transaction;
@@ -472,13 +474,20 @@ export class TransactionsService {
       );
     }
 
-    if (!transaction.customerPhone && !dto.phoneNumber.trim()) {
-      throw new BadRequestException('A customer phone number is required.');
-    }
+    const isCrypto = provider === PaymentProvider.NOWPAYMENTS;
+    let phoneNumber: string | undefined;
 
-    const phoneNumber = (
-      transaction.customerPhone || dto.phoneNumber
-    ).trim();
+    if (!isCrypto) {
+      if (!transaction.customerPhone && !dto.phoneNumber?.trim()) {
+        throw new BadRequestException('A customer phone number is required.');
+      }
+
+      phoneNumber = (transaction.customerPhone || dto.phoneNumber)!.trim();
+    } else if (!dto.payCurrency?.trim()) {
+      throw new BadRequestException(
+        'payCurrency is required for crypto payments.',
+      );
+    }
 
     // Resolve the adapter before claiming the session.
     const adapter = this.paymentProviderRegistry.get(provider);
@@ -513,7 +522,7 @@ export class TransactionsService {
         data: {
           status: PaymentStatus.PROCESSING,
           provider,
-          customerPhone: phoneNumber,
+          customerPhone: phoneNumber ?? transaction.customerPhone,
         },
       });
 
@@ -534,14 +543,27 @@ export class TransactionsService {
     });
 
     // Do not hold a database transaction open during network I/O.
-    const result = await adapter.initiatePayment({
-      transactionReference: transaction.publicReference,
-      attemptReference: attempt.id,
-      amountTambala: transaction.amountTambala,
-      currency: 'MWK',
-      phoneNumber,
-    });
-
+    const result: ProviderInitiationResult = isCrypto
+      ? await adapter.initiatePayment({
+          provider: PaymentProvider.NOWPAYMENTS,
+          transactionReference: transaction.publicReference,
+          attemptReference: attempt.id,
+          amountTambala: transaction.amountTambala,
+          currency: 'MWK',
+          payCurrency: dto.payCurrency!,
+          network: dto.network ?? '',
+        })
+      : await adapter.initiatePayment({
+          provider: provider as Exclude<
+            PaymentProvider,
+            typeof PaymentProvider.NOWPAYMENTS
+          >,
+          transactionReference: transaction.publicReference,
+          attemptReference: attempt.id,
+          amountTambala: transaction.amountTambala,
+          currency: 'MWK',
+          phoneNumber: phoneNumber!,
+        });
 
     const status = await this.applyInitiationResult(
       transaction.id,
@@ -558,15 +580,45 @@ export class TransactionsService {
             ? 'Payment outcome is uncertain and requires reconciliation.'
             : 'Payment request accepted. Awaiting customer completion.';
 
-    return {
+    const response: {
+      reference: string;
+      status: PaymentStatus;
+      provider: PaymentProvider;
+      message: string;
+      payment_instructions?: {
+        paymentAddress: string;
+        payAmount: string;
+        payCurrency: string;
+        network: string;
+        expiresAt: Date | null;
+      };
+    } = {
       reference: transaction.publicReference,
       status,
       provider,
       message,
     };
 
-  }
+    // Crypto has no synchronous "paid" moment to report back — the first
+    // response IS the payment instructions. Only attach them when the
+    // invoice was actually created; a REJECTED/UNKNOWN crypto result has
+    // nothing to show the customer.
+    if (isCrypto && result.outcome === 'ACCEPTED') {
+      const cryptoResult = result as CryptoInitiationResult & {
+        outcome: 'ACCEPTED';
+      };
 
+      response.payment_instructions = {
+        paymentAddress: cryptoResult.paymentAddress,
+        payAmount: cryptoResult.payAmount,
+        payCurrency: cryptoResult.payCurrency,
+        network: cryptoResult.network,
+        expiresAt: cryptoResult.expiresAt,
+      };
+    }
+
+    return response;
+  }
 
   /**
    * Persists the provider's initiation response only if the attempt and
@@ -575,6 +627,14 @@ export class TransactionsService {
    * A provider callback can arrive before the HTTP call returns. The guarded
    * update logic keeps the callback result authoritative when the two race each
    * other.
+   *
+   * For mobile money this callback is the provider's synchronous HTTP
+   * response. For crypto it is still just the "invoice created" response —
+   * ACCEPTED here means PROCESSING, not SUCCEEDED. The NOWPayments webhook
+   * handler (nowpayments-webhook.service.ts) is what later moves a crypto
+   * transaction from PROCESSING to SUCCEEDED/FAILED, using this exact same
+   * guarded-update idiom so the two can never race each other into a bad
+   * state.
    */
   private async applyInitiationResult(
     transactionId: string,
@@ -599,58 +659,55 @@ export class TransactionsService {
         : PaymentAttemptStatus.UNKNOWN;
 
     try {
-      const applied = await this.databaseService.$transaction(
-        async (tx) => {
-          // Only the original, unfinished attempt may consume this response.
-          const attemptUpdate = await tx.paymentAttempt.updateMany({
-            where: {
-              id: attemptId,
-              status: PaymentAttemptStatus.STARTED,
-            },
-            data: {
-              status: attemptStatus,
-              providerReference: isAccepted
-                ? result.providerReference
-                : undefined,
-              failureCode: isAccepted ? null : result.failureCode,
-              failureMessage: isAccepted ? null : result.failureMessage,
-              completedAt: isAccepted ? null : now,
-            },
-          });
+      const applied = await this.databaseService.$transaction(async (tx) => {
+        // Only the original, unfinished attempt may consume this response.
+        const attemptUpdate = await tx.paymentAttempt.updateMany({
+          where: {
+            id: attemptId,
+            status: PaymentAttemptStatus.STARTED,
+          },
+          data: {
+            status: attemptStatus,
+            providerReference: isAccepted
+              ? result.providerReference
+              : undefined,
+            failureCode: isAccepted ? null : result.failureCode,
+            failureMessage: isAccepted ? null : result.failureMessage,
+            completedAt: isAccepted ? null : now,
+          },
+        });
 
-          // A callback may already have finalized the attempt.
-          if (attemptUpdate.count !== 1) {
-            return false;
-          }
+        // A callback may already have finalized the attempt.
+        if (attemptUpdate.count !== 1) {
+          return false;
+        }
 
-          // Never replace a transaction that is no longer PROCESSING.
-          const transactionUpdate =
-            await tx.paymentTransaction.updateMany({
-              where: {
-                id: transactionId,
-                status: PaymentStatus.PROCESSING,
-              },
-              data: {
-                status: transactionStatus,
-                providerReference: isAccepted
-                  ? result.providerReference
-                  : undefined,
-                failureCode: isAccepted ? null : result.failureCode,
-                failureMessage: isAccepted ? null : result.failureMessage,
-                processedAt: isAccepted ? null : now,
-              },
-            });
+        // Never replace a transaction that is no longer PROCESSING.
+        const transactionUpdate = await tx.paymentTransaction.updateMany({
+          where: {
+            id: transactionId,
+            status: PaymentStatus.PROCESSING,
+          },
+          data: {
+            status: transactionStatus,
+            providerReference: isAccepted
+              ? result.providerReference
+              : undefined,
+            failureCode: isAccepted ? null : result.failureCode,
+            failureMessage: isAccepted ? null : result.failureMessage,
+            processedAt: isAccepted ? null : now,
+          },
+        });
 
-          if (transactionUpdate.count !== 1) {
-            // Roll back the attempt update if the transaction has changed.
-            throw new ConflictException(
-              'Payment changed while applying the provider response.',
-            );
-          }
+        if (transactionUpdate.count !== 1) {
+          // Roll back the attempt update if the transaction has changed.
+          throw new ConflictException(
+            'Payment changed while applying the provider response.',
+          );
+        }
 
-          return true;
-        },
-      );
+        return true;
+      });
 
       if (applied) {
         return transactionStatus;
@@ -674,5 +731,4 @@ export class TransactionsService {
 
     return current.status;
   }
-
 }

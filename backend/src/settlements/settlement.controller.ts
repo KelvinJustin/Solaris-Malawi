@@ -1,15 +1,8 @@
-import {
-  Body,
-  Controller,
-  Param,
-  Post,
-  Req,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Param, Post, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
-import { AdminJwtAuthGuard } from '../admin-auth/admin-jwt-auth.guard.js';
-import { AdminRolesGuard } from '../admin-auth/admin-roles.guard.js';
-import { AdminRoles } from '../admin-auth/admin-roles.decorator.js';
+import { AdminJwtAuthGuard } from '../auth/admin-auth/admin-jwt-auth.guard.js';
+import { AdminRolesGuard } from '../auth/admin-auth/admin-roles.guard.js';
+import { AdminRoles } from '../auth/admin-auth/admin-roles.decorator.js';
 import { AdminRole } from '../generated/prisma/enums.js';
 import { SettlementService } from './settlement.service.js';
 import type {
@@ -30,7 +23,10 @@ export class SettlementController {
     @Req() request: Request,
   ) {
     const admin = request.user as { adminId: string };
-    return this.settlementService.importProviderSettlement(report, admin.adminId);
+    return this.settlementService.importProviderSettlement(
+      report,
+      admin.adminId,
+    );
   }
 
   @Post('bank-statements/normalized')
