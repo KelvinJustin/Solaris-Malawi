@@ -47,7 +47,7 @@ npm run ledger:backfill -- --apply
 
 Provider-neutral settlement reconciliation and controlled posting are implemented separately from payment capture. Provider/bank-specific statement parsers, merchant fund release, withdrawals, refunds, available-balance operations, and public ledger APIs are not implemented.
 
-The NOWPayments adapter is registered alongside the test adapter. Merchants create a crypto transaction with a decimal-string amount and the supported asset/network; checkout initiation uses the saved pair and exact amount without asking for another ticker. NOWPayments requires a fiat `price_amount` even when `pay_amount` is supplied, so the adapter obtains a USD reference estimate from NOWPayments. The exact crypto amount is sent as `pay_amount`, and the reference estimate does not change payment denomination or ledger credit. The public IPN route is `/v1/provider-callbacks/nowpayments`; callbacks require a valid `x-nowpayments-sig` signature. Stale in-flight payments are reconciled by polling NOWPayments while the API key is configured. A `finished` result posts the crypto ledger capture atomically. `NOWPAYMENTS_FEE_BPS` defaults to `0`. Partial payments enter pending reconciliation. A refund IPN received after success is retained for manual handling; it does not change the successful state or automatically reverse the ledger. See [NOWPayments integration](docs/architecture/nowpaymentsIntegration.md) for request/response details.
+The NOWPayments adapter is registered alongside the test adapter. Merchants create a crypto transaction with a decimal-string amount and the supported asset/network; checkout initiation uses the saved pair and exact amount without asking for another ticker. NOWPayments requires a fiat `price_amount` even when `pay_amount` is supplied, so the adapter obtains a USD reference estimate from NOWPayments. The exact crypto amount is sent as `pay_amount`, and the reference estimate does not change payment denomination or ledger credit. The backend also logs availability by calling NOWPayments' public `/v1/status` endpoint at startup and every 60 seconds. The public IPN route is `/v1/provider-callbacks/nowpayments`; callbacks require a valid `x-nowpayments-sig` signature. Stale in-flight payments are reconciled by polling NOWPayments while the API key is configured. A `finished` result posts the crypto ledger capture atomically. `NOWPAYMENTS_FEE_BPS` defaults to `0`. Partial payments enter pending reconciliation. A refund IPN received after success is retained for manual handling; it does not change the successful state or automatically reverse the ledger. See [NOWPayments integration](docs/architecture/nowpaymentsIntegration.md) for request/response details.
 
 ---
 
@@ -191,68 +191,76 @@ The backend uses Pino for structured NestJS and HTTP logs. Logs are written as J
 
 ## API Catalog
 
-All routes are versioned under `/v1`.
+All backend routes are versioned under `/v1`. The [Bruno API Collection](./api-collections/solaris/README.md) contains request and response templates for the routes below, including both MWK and crypto checkout variants. See the [API Reference](./docs/architecture/apiReference.md) for the consolidated contract.
 
 ### Merchant Authentication (`/v1/auth`)
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/auth/register` | Public | Register new merchant with email, password, and business name. |
+| `POST` | `/v1/auth/register` | Public | Register a merchant with email, password, name, and phone. |
 | `POST` | `/v1/auth/verify-email` | Public | Verify registration OTP sent via email. |
-| `POST` | `/v1/auth/resend-verification` | Public | Resend email registration verification code. |
-| `POST` | `/v1/auth/login` | Public | Verify credentials and send 2FA OTP code. |
-| `POST` | `/v1/auth/verify-login` | Public | Validate 2FA OTP and issue HTTP-only `access_token` cookie. |
-| `GET` | `/v1/auth/me` | Cookie | Retrieve current authenticated merchant profile. |
-| `POST` | `/v1/auth/logout` | Cookie | Invalidate JWT, add token to revocation table, and clear cookie. |
-| `DELETE` | `/v1/auth/account` | Cookie | Soft-delete the authenticated merchant account. |
+| `POST` | `/v1/auth/resend-verification` | Public | Request another email-verification code. |
+| `POST` | `/v1/auth/login` | Public | Check credentials and send a login OTP. |
+| `POST` | `/v1/auth/verify-login` | Public | Validate login OTP and set the HTTP-only `access_token` cookie. |
+| `GET` | `/v1/auth/me` | Merchant cookie | Return current merchant identity. |
+| `POST` | `/v1/auth/logout` | Merchant cookie | Revoke the current JWT and clear the cookie. |
+| `DELETE` | `/v1/auth/account` | Merchant cookie | Soft-delete the authenticated merchant account. |
 
 ### Merchant Profile & KYC (`/v1/merchants`)
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `GET` | `/v1/merchants/profile` | Cookie | Get current merchant profile and onboarding status. |
-| `PATCH` | `/v1/merchants/profile` | Cookie | Update editable profile fields. |
-| `POST` | `/v1/merchants/profile/submit` | Cookie | Submit profile and uploaded KYC documents for review. |
-| `POST` | `/v1/merchants/documents/upload-url` | Cookie | Request a pre-signed object-storage upload URL for a KYC document. |
-| `POST` | `/v1/merchants/documents/:uploadId/complete` | Cookie | Confirm file upload completion and attach to profile. |
-| `GET` | `/v1/merchants/documents` | Cookie | List all uploaded KYC documents and their statuses. |
+| `GET` | `/v1/merchants/profile` | Merchant cookie | Return profile and document metadata. |
+| `PATCH` | `/v1/merchants/profile` | Merchant cookie | Update editable profile fields. |
+| `POST` | `/v1/merchants/profile/submit` | Merchant cookie | Submit the profile and required documents for review. |
+| `POST` | `/v1/merchants/documents/upload-url` | Merchant cookie | Create a signed upload URL and upload intent. |
+| `PUT` | `{{uploadUrl}}` | Presigned URL | Upload document bytes directly to object storage; not a `/v1` backend route. |
+| `POST` | `/v1/merchants/documents/:uploadId/complete` | Merchant cookie | Validate and finalize the uploaded file. |
+| `GET` | `/v1/merchants/documents` | Merchant cookie | List document metadata and assessment states. |
 
 ### Admin & Compliance (`/v1/admin` & `/v1/admin-auth`)
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/admin-auth/login` | Public | Admin login; sets HTTP-only `admin_access_token` cookie. |
-| `POST` | `/v1/admin-auth/logout` | Cookie | Revoke admin session and clear cookie. |
-| `GET` | `/v1/admin-auth/me` | Cookie | Return current admin identity and role. |
-| `GET` | `/v1/admin/merchant-applications` | Admin | List paginated merchant applications with filters. |
-| `GET` | `/v1/admin/merchant-applications/:profileId` | Admin | Detailed view of a merchant profile and documents. |
-| `POST` | `/v1/admin/merchant-applications/:profileId/start-review` | Admin | Move application into `UNDER_REVIEW` status. |
-| `POST` | `/v1/admin/merchant-applications/:profileId/approve` | Admin | Approve merchant application. |
-| `POST` | `/v1/admin/merchant-applications/:profileId/reject` | Admin | Reject merchant application with mandatory reason. |
+| `POST` | `/v1/admin-auth/login` | Public | Admin login; sets the HTTP-only `admin_access_token` cookie. |
+| `POST` | `/v1/admin-auth/logout` | Admin cookie | Revoke the admin session and clear its cookie. |
+| `GET` | `/v1/admin-auth/me` | Admin cookie | Return current admin identity and role. |
+| `GET` | `/v1/admin/merchant-applications` | `SUPER_ADMIN` or `COMPLIANCE` | List paginated submitted and in-review applications. |
+| `GET` | `/v1/admin/merchant-applications/:profileId` | `SUPER_ADMIN` or `COMPLIANCE` | Return profile, merchant, documents, and review history. |
+| `POST` | `/v1/admin/merchant-applications/:profileId/start-review` | `SUPER_ADMIN` or `COMPLIANCE` | Move a submitted application into `UNDER_REVIEW`. |
+| `POST` | `/v1/admin/merchant-applications/:profileId/approve` | `SUPER_ADMIN` or `COMPLIANCE` | Approve an in-review application after document checks. |
+| `POST` | `/v1/admin/merchant-applications/:profileId/reject` | `SUPER_ADMIN` or `COMPLIANCE` | Reject an in-review application with a reason. |
+| `GET` | `/v1/admin/merchant-applications/:profileId/documents/:documentId/preview` | `SUPER_ADMIN` or `COMPLIANCE` | Generate a time-limited document preview URL. |
 
 ### Transactions & Checkout (`/v1/transactions` & `/v1/checkout`)
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/transactions` | Merchant JWT | Create an MWK or crypto transaction with an `Idempotency-Key` header. |
-| `GET` | `/v1/transactions/:reference` | Cookie | Fetch transaction status and payment attempt history. |
-| `GET` | `/v1/checkout/:token` | Public | Validate and retrieve hosted checkout session details. |
-| `POST` | `/v1/checkout/:token/pay` | Public | Initiate payment through selected provider. |
-| `POST` | `/v1/provider-callbacks` | Signed | Webhook endpoint receiving signed provider callbacks. |
+| `POST` | `/v1/transactions` | Merchant cookie | Create an MWK or crypto transaction; requires `Idempotency-Key`. |
+| `GET` | `/v1/transactions/:reference` | Merchant cookie | Return the merchant's transaction summary and status. |
+| `GET` | `/v1/checkout/:token` | Public | Validate a hosted checkout link and return payment details. |
+| `POST` | `/v1/checkout/:token/pay` | Public + Arcjet | Initiate mobile-money or NOWPayments payment for the saved transaction. |
+| `POST` | `/v1/provider-callbacks` | Signed callback | Verify and process the generic signed provider callback. |
+| `POST` | `/v1/provider-callbacks/nowpayments` | NOWPayments IPN signature | Verify `x-nowpayments-sig` and process NOWPayments payment status. |
 
 Create a crypto-denominated transaction by sending `paymentType: "CRYPTO"`, `provider: "NOWPAYMENTS"`, `asset`, `network`, and a positive decimal-string `amount` to `POST /v1/transactions`. The selected denomination and amount are persisted with that transaction. Checkout then calls `POST /v1/checkout/:token/pay` with `{ "provider": "NOWPAYMENTS" }` only; it must not choose a replacement ticker, network, or amount. When provider payment creation succeeds, the response includes `payment_instructions` with `paymentAddress`, `payAmount`, `asset`, `network`, and `expiresAt`. Provider rejection or an uncertain result has no payment instructions; the final payment outcome is delivered through the signed NOWPayments IPN. See [NOWPayments Crypto Integration](./docs/architecture/nowpaymentsIntegration.md) for request/response examples and status behavior.
 
-### NOWPayments Webhook
+### Settlement Operations (`/v1/admin/settlements`)
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/v1/provider-callbacks/nowpayments` | NOWPayments IPN signature | Verifies the `x-nowpayments-sig` signature and processes a payment-status notification. |
+| `POST` | `/v1/admin/settlements/provider-imports/normalized` | `OPERATIONS` | Import a normalized provider settlement report. |
+| `POST` | `/v1/admin/settlements/bank-statements/normalized` | `OPERATIONS` | Import normalized bank statement lines. |
+| `POST` | `/v1/admin/settlements/:batchId/reconcile` | `OPERATIONS` | Match provider settlement items to payment records. |
+| `POST` | `/v1/admin/settlements/allocations` | `OPERATIONS` | Allocate a bank credit to a settlement batch. |
+| `POST` | `/v1/admin/settlements/:batchId/approve` | `SUPER_ADMIN` | Approve a reconciled and fully allocated batch. |
+| `POST` | `/v1/admin/settlements/:batchId/post` | `SUPER_ADMIN` | Post an approved batch to the ledger. |
 
-### Settlement Operations
-
-Settlement operations are under `/v1/admin/settlements`. Importing normalized provider/bank data, reconciliation, and allocations require `OPERATIONS`; approval and posting require `SUPER_ADMIN`. Provider- and bank-specific parsers are intentionally not supplied until their documented formats and sanitized samples are available. These workflows do not release merchant funds.
+Provider- and bank-specific parsers are not included until their documented formats and sanitized samples are available. These workflows do not release merchant funds. Settlement handlers currently return Prisma records with raw JavaScript `BigInt` amounts and no BigInt-to-JSON serializer is configured; response serialization may fail until those values are converted.
 
 ### Application Diagnostic
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
 | `GET` | `/v1/test` | Public | Returns a basic API-running message; this is not a dependency readiness check. |
+
+For detailed request/response examples, open the [Bruno API Collection guide](./api-collections/solaris/README.md). Further implementation details are linked below.
 
 ---
 
@@ -294,10 +302,17 @@ npm run format
 ## Documentation
 
 Detailed technical documents are stored in the `docs/` directory:
+- [Bruno API Collection and endpoint examples](./api-collections/solaris/README.md)
+- [Consolidated API Reference](./docs/architecture/apiReference.md)
 - [Architecture Overview](./docs/architecture/overview.md)
 - [NOWPayments Crypto Integration](./docs/architecture/nowpaymentsIntegration.md)
-- [API Reference](./docs/architecture/apiReference.md)
+- [NOWPayments Adapter](./docs/architecture/nowpaymentsAdapter.md)
 - [Auth Contract & Cookies](./docs/architecture/authContract.md)
+- [Admin Authentication Module](./docs/architecture/AdminAuthModule.md)
+- [Merchant Module](./docs/architecture/merchantModule.md)
+- [Admin Module](./docs/architecture/adminModule.md)
+- [Transactions Module](./docs/architecture/transactionsModule.md)
+- [Storage Module](./docs/architecture/storageModule.md)
 - [Database Schema & Migrations](./docs/database/setup.md)
 - [Ledger Module & Cutover Guide](./docs/architecture/ledgerModule.md)
 - [Logging & Request Correlation](./docs/development/logging.md)

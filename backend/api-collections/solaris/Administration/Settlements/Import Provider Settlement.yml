@@ -1,0 +1,55 @@
+info:
+  name: Import Provider Settlement
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/admin/settlements/provider-imports/normalized"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "provider": "TEST",
+        "providerAccountReference": "test-provider-account",
+        "sourceFileName": "test-settlement-2026-11-21.csv",
+        "sourceFileChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sourceObjectKey": "settlements/test-settlement-2026-11-21.csv",
+        "formatIdentifier": "test-normalized-v1",
+        "providerBatchReference": "test-batch-2026-11-21",
+        "currency": "MWK",
+        "reportPeriodStart": "2026-11-21T00:00:00.000Z",
+        "reportPeriodEnd": "2026-11-21T23:59:59.999Z",
+        "grossAmountTambala": 12000,
+        "providerFeeAmountTambala": 200,
+        "expectedNetAmountTambala": 11800,
+        "items": [
+          {
+            "sourceRowIdentity": "row-1",
+            "providerRecordReference": "record-1",
+            "providerPaymentReference": "test-provider-reference-001",
+            "recordKind": "PAYMENT",
+            "reportedStatus": "SUCCESS",
+            "settlementConfirmed": true,
+            "grossAmountTambala": 12000,
+            "providerFeeAmountTambala": 200,
+            "currency": "MWK",
+            "rawRecord": {
+              "providerReference": "test-provider-reference-001",
+              "grossTambala": 12000,
+              "feeTambala": 200
+            }
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

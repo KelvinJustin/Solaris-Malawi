@@ -24,6 +24,10 @@ export interface NowPaymentsEstimateResponse {
   estimated_amount: string;
 }
 
+export interface NowPaymentsApiStatusResponse {
+  message: string;
+}
+
 export interface NowPaymentsPaymentResponse {
   payment_id: string;
   payment_status: string;
@@ -88,6 +92,16 @@ function isEstimateResponse(
   );
 }
 
+function isApiStatusResponse(
+  value: unknown,
+): value is NowPaymentsApiStatusResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).message === 'string'
+  );
+}
+
 /**
  * Thin, typed wrapper over NOWPayments' v1 REST API. Deliberately does not
  * retry mutating calls (create payment) automatically — a retried
@@ -100,6 +114,16 @@ export class NowPaymentsApiClient {
   private readonly logger = new Logger(NowPaymentsApiClient.name);
 
   constructor(private readonly configService: ConfigService) {}
+
+  async getApiStatus(): Promise<NowPaymentsApiStatusResponse> {
+    const response = await this.request('/status', 'GET', undefined, false);
+    if (!isApiStatusResponse(response)) {
+      throw new BadGatewayException(
+        'NOWPayments returned an invalid API status response.',
+      );
+    }
+    return response;
+  }
 
   private get apiKey(): string {
     const key = this.configService.get<string>('nowpayments.apiKey');
@@ -177,17 +201,21 @@ export class NowPaymentsApiClient {
     path: string,
     method: 'GET' | 'POST',
     body?: string,
+    requiresApiKey = true,
   ): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     let response: Response;
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (requiresApiKey) {
+        headers['x-api-key'] = this.apiKey;
+      }
       response = await fetch(url, {
         method,
-        headers: {
-          'x-api-key': this.apiKey,
-          'Content-Type': 'application/json',
-        },
+        headers,
         ...(method === 'POST' && body ? { body } : {}),
         signal: AbortSignal.timeout(15_000),
       });

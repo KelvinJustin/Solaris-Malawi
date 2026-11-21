@@ -1,0 +1,20 @@
+info:
+  name: Start review
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/admin/merchant-applications/:profileId/start-review"
+  params:
+    - name: profileId
+      value: "{{profileId}}"
+      type: path
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

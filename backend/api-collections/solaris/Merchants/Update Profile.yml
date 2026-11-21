@@ -1,0 +1,35 @@
+info:
+  name: Update Profile
+  type: http
+  seq: 2
+
+http:
+  method: PATCH
+  url: "{{baseUrl}}/v1/merchants/profile"
+  body:
+    type: json
+    data: |-
+      {
+        "businessName": "Banda Farms",
+        "tradingName": "Banda Fresh Produce",
+        "businessType": "SOLE_TRADER",
+        "businessRegistrationNo": "BR-2024-1187",
+        "taxIdentificationNo": "TIN-3098765",
+        "merchantCategoryCode": "5411",
+        "industryDescription": "Fresh produce retail",
+        "supportEmail": "support@bandafarms.mw",
+        "supportPhone": "+265991234567",
+        "websiteUrl": "https://bandafarms.mw",
+        "addressLine1": "Plot 45, Area 47",
+        "addressLine2": null,
+        "city": "Lilongwe",
+        "district": "Lilongwe"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

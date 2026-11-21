@@ -1,0 +1,47 @@
+info:
+  name: Import Bank Statement
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/admin/settlements/bank-statements/normalized"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "bankAccountId": "{{bankAccountId}}",
+        "sourceFileName": "bank-statement-2026-11-21.csv",
+        "sourceFileChecksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sourceObjectKey": "bank-statements/bank-statement-2026-11-21.csv",
+        "formatIdentifier": "bank-normalized-v1",
+        "statementPeriodStart": "2026-11-21T00:00:00.000Z",
+        "statementPeriodEnd": "2026-11-21T23:59:59.999Z",
+        "lines": [
+          {
+            "sourceRowIdentity": "bank-row-1",
+            "bankReference": "BANK-REF-001",
+            "description": "Test provider settlement",
+            "transactionDate": "2026-11-21T12:00:00.000Z",
+            "valueDate": "2026-11-21T12:00:00.000Z",
+            "creditAmountTambala": 11800,
+            "debitAmountTambala": 0,
+            "currency": "MWK",
+            "rawRecord": {
+              "reference": "BANK-REF-001",
+              "creditTambala": 11800
+            }
+          }
+        ]
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

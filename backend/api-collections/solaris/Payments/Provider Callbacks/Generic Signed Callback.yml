@@ -1,0 +1,37 @@
+info:
+  name: Generic Signed Callback
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/provider-callbacks"
+  headers:
+    - name: Content-Type
+      value: application/json
+    - name: x-provider-timestamp
+      value: "{{callbackTimestamp}}"
+    - name: x-provider-signature
+      value: "{{callbackSignature}}"
+  body:
+    type: json
+    data: |-
+      {
+        "event": "payment.updated",
+        "providerReference": "test-provider-reference-001",
+        "transactionReference": "{{publicReference}}",
+        "attemptReference": "{{attemptId}}",
+        "amount": 150.00,
+        "currency": "MWK",
+        "provider": "TEST",
+        "status": "SUCCESSFUL",
+        "occurredAt": "2026-11-21T12:00:00.000Z"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

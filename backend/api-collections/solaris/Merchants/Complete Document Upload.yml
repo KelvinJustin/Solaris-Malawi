@@ -1,0 +1,20 @@
+info:
+  name: Complete Document Upload
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/merchants/documents/:uploadId/complete"
+  params:
+    - name: uploadId
+      value: "{{uploadId}}"
+      type: path
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

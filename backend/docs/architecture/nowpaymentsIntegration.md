@@ -258,6 +258,10 @@ When a payment is `finished`, ledger posting uses `actually_paid`, not merely th
 
 The required USD price reference is obtained from NOWPayments at initiation and is not controlled by an additional FX environment variable. `NOWPAYMENTS_FEE_BPS` affects crypto ledger fee/net only.
 
+### API availability logging
+
+The backend calls NOWPayments' unauthenticated `GET /status` endpoint once at startup and then every 60 seconds. A response with `message: "OK"` is logged as healthy; other response messages are logged as warnings, and request/response failures are logged as errors. This is an availability signal only: it does not verify payment credentials, payment creation, IPN delivery, or the database.
+
 ## 6. Known limitations
 
 - **Stale/missing webhook reconciliation exists.** It runs immediately at startup and every 60 seconds when an API key is configured; it checks payments stale for at least 5 minutes, at most 50 per run. It is process-local, not a distributed scheduler.

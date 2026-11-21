@@ -7,6 +7,7 @@ import { DatabaseModule } from '../database/database.module.js';
 import { DatabaseService } from '../database/database.service.js';
 import { TestProviderAdapter } from './adapters/test-provider.adapter.js';
 import { NowPaymentsApiClient } from './adapters/nowpayments/nowpayments-api.client.js';
+import { NowPaymentsHealthService } from './adapters/nowpayments/nowpayments-health.service.js';
 import { NowPaymentsProviderAdapter } from './adapters/nowpayments/nowpayments-payment-provider.adapter.js';
 
 import {
@@ -18,6 +19,7 @@ import {
   imports: [DatabaseModule],
   providers: [
     NowPaymentsApiClient,
+    NowPaymentsHealthService,
 
     {
       provide: TestProviderAdapter,

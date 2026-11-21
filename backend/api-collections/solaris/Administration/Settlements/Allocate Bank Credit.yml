@@ -1,0 +1,28 @@
+info:
+  name: Allocate Bank Credit
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/admin/settlements/allocations"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "batchId": "{{batchId}}",
+        "bankStatementLineId": "{{bankStatementLineId}}",
+        "amountTambala": 11800,
+        "idempotencyKey": "bank-credit-allocation-example-001"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

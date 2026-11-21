@@ -88,6 +88,57 @@ describe('NowPaymentsApiClient', () => {
     );
   });
 
+  it('checks API status without requiring or sending an API key', async () => {
+    const configService = {
+      get: vi.fn((key: string) =>
+        key === 'nowpayments.baseUrl'
+          ? 'https://sandbox.example.test/v1'
+          : undefined,
+      ),
+    } as unknown as ConfigService;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"message":"OK"}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new NowPaymentsApiClient(configService);
+
+    await expect(client.getApiStatus()).resolves.toEqual({ message: 'OK' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://sandbox.example.test/v1/status',
+      expect.objectContaining({
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  });
+
+  it('rejects an invalid API status response', async () => {
+    const configService = {
+      get: vi.fn((key: string) =>
+        key === 'nowpayments.baseUrl'
+          ? 'https://sandbox.example.test/v1'
+          : undefined,
+      ),
+    } as unknown as ConfigService;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('{"status":"OK"}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    const client = new NowPaymentsApiClient(configService);
+
+    await expect(client.getApiStatus()).rejects.toThrow(
+      'NOWPayments returned an invalid API status response.',
+    );
+  });
+
   it('rejects provider HTTP errors', async () => {
     const configService = {
       get: vi.fn((key: string) =>

@@ -1,0 +1,31 @@
+info:
+  name: NOWPayments IPN
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/provider-callbacks/nowpayments"
+  headers:
+    - name: Content-Type
+      value: application/json
+    - name: x-nowpayments-sig
+      value: "{{nowPaymentsSignature}}"
+  body:
+    type: json
+    data: |-
+      {
+        "payment_id": "{{nowPaymentsPaymentId}}",
+        "payment_status": "finished",
+        "actually_paid": 25.75,
+        "pay_amount": 25.75,
+        "order_id": "{{attemptId}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
